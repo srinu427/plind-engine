@@ -9,8 +9,8 @@ pub struct GPUInfo{
 
 #[derive(Debug, Clone, Copy)]
 pub struct Resolution2D {
-  width: u32,
-  height: u32,
+  pub width: u32,
+  pub height: u32,
 }
 
 bitflags! {
@@ -191,18 +191,22 @@ pub enum RenderBackendTaskOutput {
   DestroyDescriptorLayoutOutput(Result<(), String>),
   CreateDescriptorPoolOutput(Result<DescriptorPoolID, String>),
   DestroyDescriptorPoolOutput(Result<(), String>),
-  AllocateDescriptorSetOuput(Result<DescriptorSetID, String>),
+  AllocateDescriptorSetOutput(Result<DescriptorSetID, String>),
   UpdateDescriptorSetBufferBindingOutput(Result<(), String>),
   UpdateDescriptorSetImageBindingOutput(Result<(), String>),
   // Pipeline Related
   CreateGraphicsPipelineOutput(Result<PipelineID, String>),
-  DestroyPipelineOutout(Result<(), String>),
+  DestroyPipelineOutput(Result<(), String>),
+}
+
+pub trait RenderBackendInitializer<T> where T: RenderBackend + Sized {
+  fn new() -> Result<Self, String> where Self: Sized;
+  fn get_gpu_infos(&self) -> Vec<GPUInfo>;
+
+  fn init_backend(self, gpu_id: u32) -> Result<T, String>;
 }
 
 pub trait RenderBackend {
-  fn new() -> Result<Self, String> where Self: Sized;
-  fn get_gpu_infos(&self) -> Vec<GPUInfo>;
-  fn init(gpu_id: u32) -> Self;
   fn run_task(&mut self, task: RenderBackendTask) -> RenderBackendTaskOutput;
   fn destroy(&mut self);
 }

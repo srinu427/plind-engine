@@ -33,9 +33,9 @@ impl<T> SequentialIDStore<T>{
     }
   }
 
-  pub fn remove_obj(&mut self, id: u32) -> Result<(), &'static str>{
-    self.store.remove(&id).ok_or("item not found")?;
+  pub fn remove_obj(&mut self, id: u32) -> Result<T, &'static str>{
+    let obj = self.store.remove(&id).ok_or("item not found")?;
     self.freed.push(id);
-    Ok(())
+    Ok(obj)
   }
 }
