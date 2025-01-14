@@ -72,13 +72,13 @@ pub enum ImageSampleCount {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ImageID(u32);
+pub struct ImageID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
-pub struct ImageViewID(u32);
+pub struct ImageViewID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
-pub struct SamplerID(u32);
+pub struct SamplerID(pub u32);
 
 bitflags! {
   #[derive(Debug, Clone, Copy)]
@@ -91,7 +91,7 @@ bitflags! {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct BufferID(u32);
+pub struct BufferID(pub u32);
 
 bitflags! {
   #[derive(Debug, Clone, Copy)]
@@ -109,13 +109,13 @@ pub enum DescriptorType {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DescriptorLayoutID(u32);
+pub struct DescriptorLayoutID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
-pub struct DescriptorPoolID(u32);
+pub struct DescriptorPoolID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
-pub struct DescriptorSetID(u32);
+pub struct DescriptorSetID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineAttachmentConfig {
@@ -125,7 +125,7 @@ pub struct PipelineAttachmentConfig {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct PipelineID(u32);
+pub struct PipelineID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
 pub enum RasterStyle {

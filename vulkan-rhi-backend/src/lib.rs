@@ -1,5 +1,7 @@
 pub use rhi;
 use ash::{vk, ext, khr};
+use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc};
 use seq_id_store::SequentialIDStore;
 
 pub struct VulkanBackendInitializer {
@@ -119,24 +121,38 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
         .create_device(gpu, &device_create_info, None)
         .map_err(|e| format!("at vk device create: {e}"))?;
       let graphics_queue = ash_device.get_device_queue(graphics_queue_family_id, 0);
+      let allocator = Allocator::new(
+        &AllocatorCreateDesc {
+          instance: self.ash_instance.clone(),
+          device: ash_device.clone(),
+          physical_device: gpu,
+          debug_settings: Default::default(),
+          buffer_device_address: false,
+          allocation_sizes: Default::default(),
+        }
+      )
+        .map_err(|e| format!("at allocator create: {e}"))?;
+
+      Ok(VulkanBackend {
+        descriptor_pools: SequentialIDStore::new(1024),
+        images: SequentialIDStore::new(1024),
+        buffers: SequentialIDStore::new(1024),
+        allocator,
+        graphics_queue,
+        graphics_queue_family_id,
+        gpu,
+        ash_device,
+        ash_instance: self.ash_instance,
+      })
     }
-    Ok(VulkanBackend {
-      descriptor_pools: SequentialIDStore::new(1024),
-      images: SequentialIDStore::new(1024),
-      buffers: SequentialIDStore::new(1024),
-      graphics_queue,
-      graphics_queue_family_id,
-      gpu,
-      ash_device,
-      ash_instance: self.ash_instance,
-    })
   }
 }
 
 pub struct VulkanBackend {
   descriptor_pools: SequentialIDStore<vk::DescriptorPool>,
-  images: SequentialIDStore<vk::Image>,
+  images: SequentialIDStore<(vk::Image, Option<Allocation>)>,
   buffers: SequentialIDStore<vk::Buffer>,
+  allocator: Allocator,
   graphics_queue: vk::Queue,
   graphics_queue_family_id: u32,
   gpu: vk::PhysicalDevice,
@@ -225,16 +241,34 @@ impl VulkanBackend {
     };
     let image_id_u32 = self
       .images
-      .add_obj(image)
+      .add_obj((image, None))
       .map_err(|e| format!("max image count reached: {e}"))?;
+    let allocation = self
+      .allocator
+      .allocate(
+        &AllocationCreateDesc{
+          name: &format!("image_{image_id_u32}"),
+          requirements: Default::default(),
+          location: MemoryLocation::GpuOnly,
+          linear: false,
+          allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
+      .map_err(|e| format!("at allocator alloc: {e}"))?;
+     self
+      .images
+      .get_obj_mut(image_id_u32)
+      .map_err(|e| format!("at image allocation insert: {e}"))?
+      .1
+      .replace(allocation);
     Ok(rhi::ImageID(image_id_u32))
   }
 
   fn destroy_image(&mut self, image_id: rhi::ImageID) -> Result<(), String> {
     let rhi::ImageID(image_id) = image_id;
-    let image = self.images.remove_obj(image_id)?;
+    let (image, allocation) = self.images.remove_obj(image_id)?;
     unsafe {
       self.ash_device.destroy_image(image, None);
+      allocation.map(|a| self.allocator.free(a));
     }
     Ok(())
   }
@@ -275,7 +309,7 @@ impl VulkanBackend {
     free_able: bool,
     limits: Vec<(rhi::DescriptorType, u32)>
   ) -> Result<rhi::DescriptorPoolID, String> {
-    let pool_create_info = vk::DescriptorPoolCreateInfo::default()
+    let mut pool_create_info = vk::DescriptorPoolCreateInfo::default()
       .pool_sizes(
         &limits
           .iter()
@@ -286,6 +320,9 @@ impl VulkanBackend {
           .collect::<Vec<_>>()
       )
       .max_sets(limits.iter().map(|x| x.1).sum::<u32>());
+    if free_able {
+      pool_create_info.flags |= vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET;
+    }
     let descriptor_pool = unsafe {
       self
         .ash_device

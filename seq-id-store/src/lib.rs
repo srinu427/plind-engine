@@ -38,4 +38,12 @@ impl<T> SequentialIDStore<T>{
     self.freed.push(id);
     Ok(obj)
   }
+
+  pub fn get_obj(&self, id: u32) -> Result<&T, &'static str>{
+    self.store.get(&id).ok_or("item not found")
+  }
+
+  pub fn get_obj_mut(&mut self, id: u32) -> Result<&mut T, &'static str>{
+    self.store.get_mut(&id).ok_or("item not found")
+  }
 }
