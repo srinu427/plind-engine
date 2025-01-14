@@ -118,7 +118,7 @@ pub struct DescriptorPoolID(u32);
 pub struct DescriptorSetID(u32);
 
 #[derive(Debug, Clone, Copy)]
-pub struct PipelineAttchmentConfig {
+pub struct PipelineAttachmentConfig {
   format: ImageFormat,
   initial_layout: ImageLayoutType,
   final_layout: ImageLayoutType,
@@ -148,7 +148,7 @@ pub enum RenderBackendTask {
   // Descriptor Related
   CreateDescriptorLayout{binding_types: Vec<(u32, DescriptorType, ShaderStageFlags)>},
   DestroyDescriptorLayout{id: DescriptorLayoutID},
-  CreateDescriptorPool{freeable: bool, limits: Vec<(DescriptorType, u32)>},
+  CreateDescriptorPool{ free_able: bool, limits: Vec<(DescriptorType, u32)>},
   DestroyDescriptorPool{id: DescriptorPoolID},
   AllocateDescriptorSet{pool: DescriptorPoolID, set_layouts: DescriptorLayoutID},
   UpdateDescriptorSetBufferBinding{
@@ -168,8 +168,8 @@ pub enum RenderBackendTask {
   // Pipeline Related
   CreateGraphicsPipeline{
     raster_style: RasterStyle,
-    color_attachment_configs: Vec<PipelineAttchmentConfig>, 
-    depth_attachment_config: Option<PipelineAttchmentConfig>,
+    color_attachment_configs: Vec<PipelineAttachmentConfig>,
+    depth_attachment_config: Option<PipelineAttachmentConfig>,
   },
   DestroyPipeline{id: PipelineID},
 }

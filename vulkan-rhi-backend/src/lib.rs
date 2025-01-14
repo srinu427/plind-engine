@@ -121,6 +121,7 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
       let graphics_queue = ash_device.get_device_queue(graphics_queue_family_id, 0);
     }
     Ok(VulkanBackend {
+      descriptor_pools: SequentialIDStore::new(1024),
       images: SequentialIDStore::new(1024),
       buffers: SequentialIDStore::new(1024),
       graphics_queue,
@@ -133,6 +134,7 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
 }
 
 pub struct VulkanBackend {
+  descriptor_pools: SequentialIDStore<vk::DescriptorPool>,
   images: SequentialIDStore<vk::Image>,
   buffers: SequentialIDStore<vk::Buffer>,
   graphics_queue: vk::Queue,
@@ -185,6 +187,20 @@ impl VulkanBackend {
       flags |= vk::BufferUsageFlags::UNIFORM_BUFFER;
     }
     flags
+  }
+
+  fn translate_descriptor_type(_type: rhi::DescriptorType) -> vk::DescriptorType {
+    match _type {
+      rhi::DescriptorType::Uniform => {
+        vk::DescriptorType::UNIFORM_BUFFER
+      }
+      rhi::DescriptorType::Storage => {
+        vk::DescriptorType::STORAGE_BUFFER
+      }
+      rhi::DescriptorType::Sampler2D => {
+        vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+      }
+    }
   }
 
   fn create_2d_image(
@@ -253,6 +269,47 @@ impl VulkanBackend {
     }
     Ok(())
   }
+
+  fn create_descriptor_pool(
+    &mut self,
+    free_able: bool,
+    limits: Vec<(rhi::DescriptorType, u32)>
+  ) -> Result<rhi::DescriptorPoolID, String> {
+    let pool_create_info = vk::DescriptorPoolCreateInfo::default()
+      .pool_sizes(
+        &limits
+          .iter()
+          .map(|(ty, count)| vk::DescriptorPoolSize::default()
+            .ty(Self::translate_descriptor_type(*ty))
+            .descriptor_count(*count)
+          )
+          .collect::<Vec<_>>()
+      )
+      .max_sets(limits.iter().map(|x| x.1).sum::<u32>());
+    let descriptor_pool = unsafe {
+      self
+        .ash_device
+        .create_descriptor_pool(&pool_create_info, None)
+        .map_err(|e| format!("at vk descriptor pool create: {e}"))?
+    };
+    let descriptor_pool_id_u32 = self
+      .descriptor_pools
+      .add_obj(descriptor_pool)
+      .map_err(|e| format!("max descriptor pool count reached: {e}"))?;
+    Ok(rhi::DescriptorPoolID(descriptor_pool_id_u32))
+  }
+
+  fn destroy_descriptor_pool(
+    &mut self,
+    descriptor_pool_id: rhi::DescriptorPoolID
+  ) -> Result<(), String> {
+    let rhi::DescriptorPoolID(descriptor_pool) = descriptor_pool_id;
+    let descriptor_pool = self.descriptor_pools.remove_obj(descriptor_pool)?;
+    unsafe {
+      self.ash_device.destroy_descriptor_pool(descriptor_pool, None);
+    }
+    Ok(())
+  }
 }
 
 impl rhi::RenderBackend for VulkanBackend {
@@ -296,8 +353,16 @@ impl rhi::RenderBackend for VulkanBackend {
       }
       rhi::RenderBackendTask::CreateDescriptorLayout { .. } => {}
       rhi::RenderBackendTask::DestroyDescriptorLayout { .. } => {}
-      rhi::RenderBackendTask::CreateDescriptorPool { .. } => {}
-      rhi::RenderBackendTask::DestroyDescriptorPool { .. } => {}
+      rhi::RenderBackendTask::CreateDescriptorPool { free_able, limits } => {
+        return rhi::RenderBackendTaskOutput::CreateDescriptorPoolOutput(
+          self.create_descriptor_pool(free_able, limits)
+        );
+      }
+      rhi::RenderBackendTask::DestroyDescriptorPool { id } => {
+        return rhi::RenderBackendTaskOutput::DestroyDescriptorPoolOutput(
+          self.destroy_descriptor_pool(id)
+        );
+      }
       rhi::RenderBackendTask::AllocateDescriptorSet { .. } => {}
       rhi::RenderBackendTask::UpdateDescriptorSetBufferBinding { .. } => {}
       rhi::RenderBackendTask::UpdateDescriptorSetImageBinding { .. } => {}
