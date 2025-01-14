@@ -1,0 +1,9 @@
+[package]
+name = "vulkan-rhi-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rhi ={ path = "../rhi"}
+seq-id-store ={ path = "../seq-id-store"}
+ash = "0.38.0+1.3.281"
