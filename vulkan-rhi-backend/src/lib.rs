@@ -134,6 +134,7 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
         .map_err(|e| format!("at allocator create: {e}"))?;
 
       Ok(VulkanBackend {
+        descriptor_sets: SequentialIDStore::new(1024),
         descriptor_set_layouts: SequentialIDStore::new(1024),
         descriptor_pools: SequentialIDStore::new(1024),
         images: SequentialIDStore::new(1024),
@@ -150,6 +151,7 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
 }
 
 pub struct VulkanBackend {
+  descriptor_sets: SequentialIDStore<vk::DescriptorSet>,
   descriptor_set_layouts: SequentialIDStore<vk::DescriptorSetLayout>,
   descriptor_pools: SequentialIDStore<vk::DescriptorPool>,
   images: SequentialIDStore<(vk::Image, Option<Allocation>)>,
@@ -433,12 +435,38 @@ impl VulkanBackend {
     let rhi::DescriptorLayoutID(descriptor_layout_id) = descriptor_layout_id;
     let descriptor_layout = self
         .descriptor_set_layouts
-        .remove_obj(descriptor_layout_id)
-        .map_err(|e| format!("max descriptor set layout reached: {e}"))?;
+        .remove_obj(descriptor_layout_id)?;
     unsafe {
       self.ash_device.destroy_descriptor_set_layout(descriptor_layout, None);
     }
     Ok(())
+  }
+
+  fn allocate_descriptor_set(
+    &mut self,
+    pool: rhi::DescriptorPoolID,
+    set_layout: rhi::DescriptorLayoutID
+  ) -> Result<rhi::DescriptorSetID, String> {
+    let rhi::DescriptorPoolID(descriptor_pool) = pool;
+    let pool = self.descriptor_pools.get_obj(descriptor_pool)?;
+    let rhi::DescriptorLayoutID(descriptor_set_layout_id) = set_layout;
+    let set_layout = self.descriptor_set_layouts.get_obj(descriptor_set_layout_id)?;
+    let vk_descriptor_set = unsafe {
+      self
+        .ash_device
+        .allocate_descriptor_sets(
+          &vk::DescriptorSetAllocateInfo::default()
+            .set_layouts(&[*set_layout])
+            .descriptor_pool(*pool)
+        )
+        .map_err(|e| format!("at allocate descriptor sets: {e}"))?
+        .remove(0)
+    };
+    let descriptor_set_id_u32 = self
+      .descriptor_sets
+      .add_obj(vk_descriptor_set)
+      .map_err(|e| format!("max descriptor sets reached: {e}"))?;
+    Ok(rhi::DescriptorSetID(descriptor_set_id_u32))
   }
 }
 
@@ -501,7 +529,11 @@ impl rhi::RenderBackend for VulkanBackend {
           self.destroy_descriptor_pool(id)
         );
       }
-      rhi::RenderBackendTask::AllocateDescriptorSet { .. } => {}
+      rhi::RenderBackendTask::AllocateDescriptorSet { pool, set_layout } => {
+        return rhi::RenderBackendTaskOutput::AllocateDescriptorSetOutput(
+          self.allocate_descriptor_set(pool, set_layout)
+        );
+      }
       rhi::RenderBackendTask::UpdateDescriptorSetBufferBinding { .. } => {}
       rhi::RenderBackendTask::UpdateDescriptorSetImageBinding { .. } => {}
       rhi::RenderBackendTask::CreateGraphicsPipeline { .. } => {}

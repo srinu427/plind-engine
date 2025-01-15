@@ -168,7 +168,7 @@ pub enum RenderBackendTask {
   DestroyDescriptorLayout{id: DescriptorLayoutID},
   CreateDescriptorPool{ free_able: bool, limits: Vec<(DescriptorType, u32)>},
   DestroyDescriptorPool{id: DescriptorPoolID},
-  AllocateDescriptorSet{pool: DescriptorPoolID, set_layouts: DescriptorLayoutID},
+  AllocateDescriptorSet {pool: DescriptorPoolID, set_layout: DescriptorLayoutID},
   UpdateDescriptorSetBufferBinding{
     set: DescriptorSetID,
     binding: u32,
