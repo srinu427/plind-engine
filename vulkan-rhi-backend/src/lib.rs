@@ -134,6 +134,7 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
         .map_err(|e| format!("at allocator create: {e}"))?;
 
       Ok(VulkanBackend {
+        descriptor_set_layouts: SequentialIDStore::new(1024),
         descriptor_pools: SequentialIDStore::new(1024),
         images: SequentialIDStore::new(1024),
         buffers: SequentialIDStore::new(1024),
@@ -149,9 +150,10 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
 }
 
 pub struct VulkanBackend {
+  descriptor_set_layouts: SequentialIDStore<vk::DescriptorSetLayout>,
   descriptor_pools: SequentialIDStore<vk::DescriptorPool>,
   images: SequentialIDStore<(vk::Image, Option<Allocation>)>,
-  buffers: SequentialIDStore<vk::Buffer>,
+  buffers: SequentialIDStore<(vk::Buffer, Option<Allocation>)>,
   allocator: Allocator,
   graphics_queue: vk::Queue,
   graphics_queue_family_id: u32,
@@ -161,6 +163,13 @@ pub struct VulkanBackend {
 }
 
 impl VulkanBackend {
+  fn translate_memory_location(memory_location: rhi::MemoryLocation) -> MemoryLocation {
+    match memory_location {
+      rhi::MemoryLocation::Any => {MemoryLocation::GpuOnly}
+      rhi::MemoryLocation::GPU => {MemoryLocation::GpuOnly}
+      rhi::MemoryLocation::Shared => {MemoryLocation::CpuToGpu}
+    }
+  }
   fn translate_image_format(format: rhi::ImageFormat) -> vk::Format {
     match format {
       rhi::ImageFormat::Texture => {vk::Format::R8G8B8A8_UNORM}
@@ -219,11 +228,25 @@ impl VulkanBackend {
     }
   }
 
+  fn translate_shader_stage_flags(
+    shader_stage_flags: rhi::ShaderStageFlags
+  ) -> vk::ShaderStageFlags {
+    let mut flags = vk::ShaderStageFlags::empty();
+    if shader_stage_flags.contains(rhi::ShaderStageFlags::VERTEX) {
+      flags |= vk::ShaderStageFlags::VERTEX;
+    }
+    if shader_stage_flags.contains(rhi::ShaderStageFlags::FRAGMENT) {
+      flags |= vk::ShaderStageFlags::FRAGMENT;
+    }
+    flags
+  }
+
   fn create_2d_image(
     &mut self,
     res: rhi::Resolution2D,
     format: rhi::ImageFormat,
-    usage: rhi::ImageUsage
+    usage: rhi::ImageUsage,
+    memory_location: rhi::MemoryLocation,
   ) -> Result<rhi::ImageID, String> {
     let image_create_info = vk::ImageCreateInfo::default()
       .image_type(vk::ImageType::TYPE_2D)
@@ -243,13 +266,16 @@ impl VulkanBackend {
       .images
       .add_obj((image, None))
       .map_err(|e| format!("max image count reached: {e}"))?;
+    let memory_requirements = unsafe {
+      self.ash_device.get_image_memory_requirements(image)
+    };
     let allocation = self
       .allocator
       .allocate(
         &AllocationCreateDesc{
           name: &format!("image_{image_id_u32}"),
-          requirements: Default::default(),
-          location: MemoryLocation::GpuOnly,
+          requirements: memory_requirements,
+          location: Self::translate_memory_location(memory_location),
           linear: false,
           allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })
@@ -276,7 +302,8 @@ impl VulkanBackend {
   fn create_buffer(
     &mut self,
     size: u64,
-    usage: rhi::BufferUsage
+    usage: rhi::BufferUsage,
+    memory_location: rhi::MemoryLocation,
   ) -> Result<rhi::BufferID, String> {
     let buffer_create_info = vk::BufferCreateInfo::default()
       .size(size)
@@ -290,16 +317,37 @@ impl VulkanBackend {
     };
     let buffer_id_u32 = self
       .buffers
-      .add_obj(buffer)
+      .add_obj((buffer, None))
       .map_err(|e| format!("max buffer count reached: {e}"))?;
+    let memory_requirements = unsafe {
+      self.ash_device.get_buffer_memory_requirements(buffer)
+    };
+    let allocation = self
+      .allocator
+      .allocate(
+        &AllocationCreateDesc{
+          name: &format!("buffer_{buffer_id_u32}"),
+          requirements: memory_requirements,
+          location: Self::translate_memory_location(memory_location),
+          linear: false,
+          allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
+      .map_err(|e| format!("at allocator alloc: {e}"))?;
+    self
+      .buffers
+      .get_obj_mut(buffer_id_u32)
+      .map_err(|e| format!("at buffer allocation insert: {e}"))?
+      .1
+      .replace(allocation);
     Ok(rhi::BufferID(buffer_id_u32))
   }
 
   fn destroy_buffer(&mut self, buffer_id: rhi::BufferID) -> Result<(), String> {
     let rhi::BufferID(buffer_id) = buffer_id;
-    let buffer = self.buffers.remove_obj(buffer_id)?;
+    let (buffer, allocation) = self.buffers.remove_obj(buffer_id)?;
     unsafe {
       self.ash_device.destroy_buffer(buffer, None);
+      allocation.map(|a| self.allocator.free(a));
     }
     Ok(())
   }
@@ -347,6 +395,51 @@ impl VulkanBackend {
     }
     Ok(())
   }
+
+  fn create_descriptor_layout(
+    &mut self,
+    binding_types: Vec<(u32, rhi::DescriptorType, rhi::ShaderStageFlags)>
+  ) -> Result<rhi::DescriptorLayoutID, String> {
+    let vk_descriptor_bindings = binding_types
+      .iter()
+      .enumerate()
+      .map(|(i, binding)| {
+        vk::DescriptorSetLayoutBinding::default()
+          .binding(i as _)
+          .stage_flags(Self::translate_shader_stage_flags(binding.2))
+          .descriptor_type(Self::translate_descriptor_type(binding.1))
+          .descriptor_count(1)
+      })
+      .collect::<Vec<_>>();
+    let descriptor_layout_create_info = vk::DescriptorSetLayoutCreateInfo::default()
+      .bindings(&vk_descriptor_bindings);
+    let descriptor_layout = unsafe {
+      self
+        .ash_device
+        .create_descriptor_set_layout(&descriptor_layout_create_info, None)
+        .map_err(|e| format!("at vk descriptor set layout: {e}"))?
+    };
+    let descriptor_set_layout_id_u32 = self
+      .descriptor_set_layouts
+      .add_obj(descriptor_layout)
+      .map_err(|e| format!("max descriptor set layout reached: {e}"))?;
+    Ok(rhi::DescriptorLayoutID(descriptor_set_layout_id_u32))
+  }
+
+  fn destroy_descriptor_layout(
+    &mut self,
+    descriptor_layout_id: rhi::DescriptorLayoutID
+  ) -> Result<(), String> {
+    let rhi::DescriptorLayoutID(descriptor_layout_id) = descriptor_layout_id;
+    let descriptor_layout = self
+        .descriptor_set_layouts
+        .remove_obj(descriptor_layout_id)
+        .map_err(|e| format!("max descriptor set layout reached: {e}"))?;
+    unsafe {
+      self.ash_device.destroy_descriptor_set_layout(descriptor_layout, None);
+    }
+    Ok(())
+  }
 }
 
 impl rhi::RenderBackend for VulkanBackend {
@@ -366,9 +459,9 @@ impl rhi::RenderBackend for VulkanBackend {
         }
         return rhi::RenderBackendTaskOutput::UnorderedTasksOutput(outputs);
       }
-      rhi::RenderBackendTask::Create2DImage { res, format, usage } => {
+      rhi::RenderBackendTask::Create2DImage { res, format, usage, memory_location } => {
         return rhi::RenderBackendTaskOutput::Create2DImageOutput(
-          self.create_2d_image(res, format, usage)
+          self.create_2d_image(res, format, usage, memory_location)
         );
       }
       rhi::RenderBackendTask::DestroyImage { id } => {
@@ -378,9 +471,9 @@ impl rhi::RenderBackend for VulkanBackend {
       }
       rhi::RenderBackendTask::CreateImageView { .. } => {}
       rhi::RenderBackendTask::DestroyImageView { .. } => {}
-      rhi::RenderBackendTask::CreateBuffer { size, usage } => {
+      rhi::RenderBackendTask::CreateBuffer { size, usage, memory_location } => {
         return rhi::RenderBackendTaskOutput::CreateBufferOutput(
-          self.create_buffer(size, usage)
+          self.create_buffer(size, usage, memory_location)
         );
       }
       rhi::RenderBackendTask::DestroyBuffer { id } => {
@@ -388,8 +481,16 @@ impl rhi::RenderBackend for VulkanBackend {
           self.destroy_buffer(id)
         );
       }
-      rhi::RenderBackendTask::CreateDescriptorLayout { .. } => {}
-      rhi::RenderBackendTask::DestroyDescriptorLayout { .. } => {}
+      rhi::RenderBackendTask::CreateDescriptorLayout { binding_types } => {
+        return rhi::RenderBackendTaskOutput::CreateDescriptorLayoutOutput(
+          self.create_descriptor_layout(binding_types)
+        );
+      }
+      rhi::RenderBackendTask::DestroyDescriptorLayout { id } => {
+        return rhi::RenderBackendTaskOutput::DestroyDescriptorLayoutOutput(
+          self.destroy_descriptor_layout(id)
+        );
+      }
       rhi::RenderBackendTask::CreateDescriptorPool { free_able, limits } => {
         return rhi::RenderBackendTaskOutput::CreateDescriptorPoolOutput(
           self.create_descriptor_pool(free_able, limits)

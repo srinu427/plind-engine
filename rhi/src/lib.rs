@@ -13,6 +13,12 @@ pub struct Resolution2D {
   pub height: u32,
 }
 
+pub enum MemoryLocation{
+  Any,
+  GPU,
+  Shared,
+}
+
 bitflags! {
   #[derive(Debug, Clone, Copy)]
   pub struct ImageUsage: u32 {
@@ -133,17 +139,29 @@ pub enum RasterStyle {
   WireFrame{thickness: u32}
 }
 
+pub trait RenderBackendInitializer<T> where T: RenderBackend + Sized {
+  fn new() -> Result<Self, String> where Self: Sized;
+  fn get_gpu_infos(&self) -> Vec<GPUInfo>;
+
+  fn init_backend(self, gpu_id: u32) -> Result<T, String>;
+}
+
 pub enum RenderBackendTask {
   // Meta
   OrderedTasks(Vec<Self>),
   UnorderedTasks(Vec<Self>),
   // Image Related
-  Create2DImage{res: Resolution2D, format: ImageFormat, usage: ImageUsage},
+  Create2DImage{
+    res: Resolution2D,
+    format: ImageFormat,
+    usage: ImageUsage,
+    memory_location: MemoryLocation
+  },
   DestroyImage{id: ImageID},
   CreateImageView{image_id: ImageID},
   DestroyImageView{image_view_id: ImageViewID},
   // Buffer Related
-  CreateBuffer{size: u64, usage: BufferUsage},
+  CreateBuffer{size: u64, usage: BufferUsage, memory_location: MemoryLocation},
   DestroyBuffer{id: BufferID},
   // Descriptor Related
   CreateDescriptorLayout{binding_types: Vec<(u32, DescriptorType, ShaderStageFlags)>},
@@ -197,13 +215,6 @@ pub enum RenderBackendTaskOutput {
   // Pipeline Related
   CreateGraphicsPipelineOutput(Result<PipelineID, String>),
   DestroyPipelineOutput(Result<(), String>),
-}
-
-pub trait RenderBackendInitializer<T> where T: RenderBackend + Sized {
-  fn new() -> Result<Self, String> where Self: Sized;
-  fn get_gpu_infos(&self) -> Vec<GPUInfo>;
-
-  fn init_backend(self, gpu_id: u32) -> Result<T, String>;
 }
 
 pub trait RenderBackend {
