@@ -151,8 +151,8 @@ impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
 }
 
 pub struct VulkanBackend {
-  descriptor_sets: SequentialIDStore<vk::DescriptorSet>,
-  descriptor_set_layouts: SequentialIDStore<vk::DescriptorSetLayout>,
+  descriptor_sets: SequentialIDStore<(vk::DescriptorSet, u32, u32)>,
+  descriptor_set_layouts: SequentialIDStore<(vk::DescriptorSetLayout, Vec<vk::DescriptorType>)>,
   descriptor_pools: SequentialIDStore<vk::DescriptorPool>,
   images: SequentialIDStore<(vk::Image, Option<Allocation>)>,
   buffers: SequentialIDStore<(vk::Buffer, Option<Allocation>)>,
@@ -423,7 +423,10 @@ impl VulkanBackend {
     };
     let descriptor_set_layout_id_u32 = self
       .descriptor_set_layouts
-      .add_obj(descriptor_layout)
+      .add_obj((
+        descriptor_layout,
+        binding_types.iter().map(|x| x.1).map(Self::translate_descriptor_type).collect()
+      ))
       .map_err(|e| format!("max descriptor set layout reached: {e}"))?;
     Ok(rhi::DescriptorLayoutID(descriptor_set_layout_id_u32))
   }
@@ -437,7 +440,7 @@ impl VulkanBackend {
         .descriptor_set_layouts
         .remove_obj(descriptor_layout_id)?;
     unsafe {
-      self.ash_device.destroy_descriptor_set_layout(descriptor_layout, None);
+      self.ash_device.destroy_descriptor_set_layout(descriptor_layout.0, None);
     }
     Ok(())
   }
@@ -456,7 +459,7 @@ impl VulkanBackend {
         .ash_device
         .allocate_descriptor_sets(
           &vk::DescriptorSetAllocateInfo::default()
-            .set_layouts(&[*set_layout])
+            .set_layouts(&[set_layout.0])
             .descriptor_pool(*pool)
         )
         .map_err(|e| format!("at allocate descriptor sets: {e}"))?
@@ -464,9 +467,40 @@ impl VulkanBackend {
     };
     let descriptor_set_id_u32 = self
       .descriptor_sets
-      .add_obj(vk_descriptor_set)
+      .add_obj((vk_descriptor_set, descriptor_pool, descriptor_set_layout_id))
       .map_err(|e| format!("max descriptor sets reached: {e}"))?;
     Ok(rhi::DescriptorSetID(descriptor_set_id_u32))
+  }
+
+  fn update_descriptor_set_buffer_binding(
+    &mut self,
+    set: rhi::DescriptorSetID,
+    binding: u32,
+    buffer_id: rhi::BufferID,
+    offset: u64,
+    len: Option<u64>,
+  ) -> Result<(), String> {
+    let rhi::DescriptorSetID(descriptor_set_id) = set;
+    let rhi::BufferID(buffer_id) = buffer_id;
+
+    let set = self.descriptor_sets.get_obj(descriptor_set_id)?;
+    let set_layout = self.descriptor_set_layouts.get_obj(set.2)?;
+    let buffer = self.buffers.get_obj(buffer_id)?;
+
+    let write_info = vk::WriteDescriptorSet::default()
+      .dst_set(set.0)
+      .dst_binding(binding)
+      .descriptor_type(set_layout.1[binding as usize])
+      .descriptor_count(1)
+      .buffer_info(&[vk::DescriptorBufferInfo::default()
+        .buffer(buffer.0)
+        .offset(offset)
+        .range(len.unwrap_or(vk::WHOLE_SIZE))
+      ]);
+    unsafe {
+      self.ash_device.update_descriptor_sets(&[write_info], &[]);
+    }
+    Ok(())
   }
 }
 
@@ -534,7 +568,17 @@ impl rhi::RenderBackend for VulkanBackend {
           self.allocate_descriptor_set(pool, set_layout)
         );
       }
-      rhi::RenderBackendTask::UpdateDescriptorSetBufferBinding { .. } => {}
+      rhi::RenderBackendTask::UpdateDescriptorSetBufferBinding {
+        set,
+        binding,
+        buffer_id,
+        offset,
+        len
+      } => {
+        return rhi::RenderBackendTaskOutput::UpdateDescriptorSetBufferBindingOutput(
+          self.update_descriptor_set_buffer_binding(set, binding, buffer_id, offset, len)
+        );
+      }
       rhi::RenderBackendTask::UpdateDescriptorSetImageBinding { .. } => {}
       rhi::RenderBackendTask::CreateGraphicsPipeline { .. } => {}
       rhi::RenderBackendTask::DestroyPipeline { .. } => {}
