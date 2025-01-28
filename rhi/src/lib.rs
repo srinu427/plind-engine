@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use bitflags::bitflags;
 
 #[derive(Debug, Clone)]
@@ -124,14 +125,10 @@ pub struct DescriptorPoolID(pub u32);
 pub struct DescriptorSetID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
-pub struct PipelineAttachmentConfig {
-  format: ImageFormat,
-  initial_layout: ImageLayoutType,
-  final_layout: ImageLayoutType,
-}
+pub struct PipelineID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
-pub struct PipelineID(pub u32);
+pub struct FramebufferID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
 pub enum RasterStyle {
@@ -139,85 +136,78 @@ pub enum RasterStyle {
   WireFrame{thickness: u32}
 }
 
-pub trait RenderBackendInitializer<T> where T: RenderBackend + Sized {
-  fn new() -> Result<Self, String> where Self: Sized;
-  fn get_gpu_infos(&self) -> Vec<GPUInfo>;
+#[derive(Debug, Clone, Copy)]
+pub struct InputSetID(pub u32);
 
-  fn init_backend(self, gpu_id: u32) -> Result<T, String>;
+#[derive(Debug, Clone)]
+pub struct DrawInfo{
+  offset: u32,
+  count: u32,
 }
 
-pub enum RenderBackendTask {
-  // Meta
-  OrderedTasks(Vec<Self>),
-  UnorderedTasks(Vec<Self>),
-  // Image Related
-  Create2DImage{
+#[derive(Debug, Clone)]
+pub enum GPUCommands{
+  CopyBufferToBuffer{src: BufferID, dst: BufferID},
+  CopyBufferToImage{src: BufferID, dst: ImageID},
+  BlitImage{src: ImageID, dst: ImageID},
+  RunGraphicsPipeline{
+    pipeline: PipelineID,
+    framebuffer: FramebufferID,
+    input_set: InputSetID,
+    draw_infos: Vec<DrawInfo>
+  },
+}
+
+#[trait_variant::make(RenderBackendInitializer: Send)]
+pub trait LocalRenderBackendInitializer<T> where T: RenderBackend + Sized {
+  fn new() -> Result<Self, String> where Self: Sized;
+
+  fn get_gpu_infos(&self) -> Vec<GPUInfo>;
+
+  async fn init_backend(self, gpu_id: u32) -> Result<T, String>;
+}
+
+#[trait_variant::make(RenderBackend: Send)]
+pub trait LocalRenderBackend {
+  fn create_buffer(
+    &mut self,
+    size: u64,
+    usage: BufferUsage,
+    memory_location: MemoryLocation
+  ) -> Result<BufferID, String>;
+
+  fn create_texture_2d(
+    &mut self,
     res: Resolution2D,
     format: ImageFormat,
     usage: ImageUsage,
     memory_location: MemoryLocation
-  },
-  DestroyImage{id: ImageID},
-  CreateImageView{image_id: ImageID},
-  DestroyImageView{image_view_id: ImageViewID},
-  // Buffer Related
-  CreateBuffer{size: u64, usage: BufferUsage, memory_location: MemoryLocation},
-  DestroyBuffer{id: BufferID},
-  // Descriptor Related
-  CreateDescriptorLayout{binding_types: Vec<(u32, DescriptorType, ShaderStageFlags)>},
-  DestroyDescriptorLayout{id: DescriptorLayoutID},
-  CreateDescriptorPool{ free_able: bool, limits: Vec<(DescriptorType, u32)>},
-  DestroyDescriptorPool{id: DescriptorPoolID},
-  AllocateDescriptorSet {pool: DescriptorPoolID, set_layout: DescriptorLayoutID},
-  UpdateDescriptorSetBufferBinding{
-    set: DescriptorSetID,
-    binding: u32,
-    buffer_id: BufferID,
-    offset: u64,
-    len: Option<u64>,
-  },
-  UpdateDescriptorSetImageBinding{
-    set: DescriptorSetID,
-    binding: u32,
-    image_view_id: ImageViewID,
-    sampler: SamplerID,
-    layout: ImageLayoutType,
-  },
-  // Pipeline Related
-  CreateGraphicsPipeline{
+  ) -> Result<ImageID, String>;
+
+  async fn create_graphics_pipeline(
+    &mut self,
     raster_style: RasterStyle,
-    color_attachment_configs: Vec<PipelineAttachmentConfig>,
-    depth_attachment_config: Option<PipelineAttachmentConfig>,
-  },
-  DestroyPipeline{id: PipelineID},
-}
+    color_attachment_formats: Vec<ImageFormat>,
+    depth_attachment_formats: Option<ImageFormat>,
+    max_buffer_count: u32,
+    max_texture_count: u32,
+    vertex_shader: PathBuf,
+    fragment_shader: PathBuf,
+  ) -> Result<PipelineID, String>;
 
-pub enum RenderBackendTaskOutput {
-  // Meta
-  OrderedTasksOutput(Vec<Self>),
-  UnorderedTasksOutput(Vec<Self>),
-  // Image Related
-  Create2DImageOutput(Result<ImageID, String>),
-  DestroyImageOutput(Result<(), String>),
-  CreateImageViewOutput(Result<ImageViewID, String>),
-  DestroyImageViewOutput(Result<(), String>),
-  // Buffer Related
-  CreateBufferOutput(Result<BufferID, String>),
-  DestroyBufferOutput(Result<(), String>),
-  // Descriptor Related
-  CreateDescriptorLayoutOutput(Result<DescriptorLayoutID, String>),
-  DestroyDescriptorLayoutOutput(Result<(), String>),
-  CreateDescriptorPoolOutput(Result<DescriptorPoolID, String>),
-  DestroyDescriptorPoolOutput(Result<(), String>),
-  AllocateDescriptorSetOutput(Result<DescriptorSetID, String>),
-  UpdateDescriptorSetBufferBindingOutput(Result<(), String>),
-  UpdateDescriptorSetImageBindingOutput(Result<(), String>),
-  // Pipeline Related
-  CreateGraphicsPipelineOutput(Result<PipelineID, String>),
-  DestroyPipelineOutput(Result<(), String>),
-}
+  fn create_frame_buffer(
+    &mut self,
+    pipeline_id: PipelineID,
+    color_attachments: Vec<ImageID>,
+    depth_attachment: Option<ImageID>,
+  ) -> Result<FramebufferID, String>;
 
-pub trait RenderBackend {
-  fn run_task(&mut self, task: RenderBackendTask) -> RenderBackendTaskOutput;
-  fn destroy(&mut self);
+  fn create_input_set(&mut self, pipeline_id: PipelineID) -> Result<InputSetID, String>;
+
+  fn update_input_set(
+    &mut self,
+    input_set: InputSetID,
+    buffers: Vec<BufferID>,
+    textures: Vec<ImageID>
+  ) -> Result<(), String>;
 }
