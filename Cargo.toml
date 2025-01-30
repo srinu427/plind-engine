@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 winit = { version = "0.30.8", features = ["rwh_06"] }
-vulkan-rhi-backend = {path = "vulkan-rhi-backend"}
+renderer = {path = "renderer"}

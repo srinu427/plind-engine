@@ -1,0 +1,9 @@
+[package]
+name = "renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rhi = {path = "../rhi"}
+vulkan-rhi-backend = {path = "../vulkan-rhi-backend"}
+glam = "0.29.2"

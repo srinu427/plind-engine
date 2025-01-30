@@ -1,7 +1,9 @@
-use std::fmt::Debug;
+mod helpers;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
 pub use rhi;
-use ash::{vk, ext, khr};
+use ash::{vk, khr};
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{
   Allocation,
@@ -10,6 +12,7 @@ use gpu_allocator::vulkan::{
   Allocator,
   AllocatorCreateDesc
 };
+use rhi::{HasDisplayHandle, HasWindowHandle, SwapchainInfo};
 use seq_id_store::SequentialIDStore;
 use tokio::fs;
 
@@ -112,6 +115,16 @@ fn translate_raster_style(
   }
 }
 
+fn get_aspect_mask(format: rhi::ImageFormat) -> vk::ImageAspectFlags {
+  match format {
+    rhi::ImageFormat::Texture => { vk::ImageAspectFlags::COLOR }
+    rhi::ImageFormat::Float => { vk::ImageAspectFlags::COLOR }
+    rhi::ImageFormat::Depth => { vk::ImageAspectFlags::DEPTH }
+    rhi::ImageFormat::RenderIntermediate => { vk::ImageAspectFlags::COLOR }
+    rhi::ImageFormat::Presentation => { vk::ImageAspectFlags::COLOR }
+  }
+}
+
 pub struct AllocatedBuffer{
   buffer: vk::Buffer,
   size: u64,
@@ -134,183 +147,34 @@ pub struct GraphicsPipeline{
   texture_set_layout: vk::DescriptorSetLayout,
 }
 
-pub struct BindlessDescriptorSets {
+pub struct InputSetVK {
   buffer_set: vk::DescriptorSet,
   texture_set: vk::DescriptorSet,
+  bound_buffers: Vec<rhi::BufferID>,
+  bound_textures: Vec<rhi::ImageID>,
 }
 
-pub struct VulkanBackendInitializer {
-  vk_gpus: Vec<vk::PhysicalDevice>,
-  ash_instance: ash::Instance,
-  ash_entry: ash::Entry,
+pub struct FramebufferVK {
+  framebuffer: vk::Framebuffer,
+  color_attachments: Vec<rhi::ImageID>,
+  depth_attachment: Option<rhi::ImageID>,
 }
 
-impl rhi::RenderBackendInitializer<VulkanBackend> for VulkanBackendInitializer {
-  fn new() -> Result<Self, String> where Self: Sized {
-    unsafe {
-      let ash_entry = ash::Entry::load().map_err(|e| format!("at VK load: {e}"))?;
-      let layers = [
-        #[cfg(debug_assertions)]
-        c"VK_LAYER_KHRONOS_validation".as_ptr(),
-      ];
-      let extensions = [
-        #[cfg(debug_assertions)]
-        ext::debug_utils::NAME.as_ptr(),
-        khr::get_physical_device_properties2::NAME.as_ptr(),
-        khr::surface::NAME.as_ptr(),
-        #[cfg(target_os = "windows")]
-        khr::win32_surface::NAME.as_ptr(),
-        #[cfg(target_os = "linux")]
-        khr::xlib_surface::NAME.as_ptr(),
-        #[cfg(target_os = "linux")]
-        khr::wayland_surface::NAME.as_ptr(),
-        #[cfg(target_os = "macos")]
-        khr::portability_enumeration::NAME.as_ptr(),
-        #[cfg(target_os = "macos")]
-        ext::metal_surface::NAME.as_ptr(),
-        #[cfg(target_os = "android")]
-        khr::android_surface::NAME.as_ptr(),
-      ];
-    
-      let app_info = vk::ApplicationInfo::default()
-        .application_name(c"Plind VK App")
-        .application_version(0)
-        .engine_name(c"Plind Engine")
-        .engine_version(0)
-        .api_version(vk::API_VERSION_1_0);
-    
-      #[cfg(target_os = "macos")]
-      let vk_instance_create_info = vk::InstanceCreateInfo::default()
-        .flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
-        .application_info(&app_info)
-        .enabled_layer_names(&layers)
-        .enabled_extension_names(&extensions);
-    
-      #[cfg(not(target_os = "macos"))]
-      let vk_instance_create_info = vk::InstanceCreateInfo::default()
-        .application_info(&app_info)
-        .enabled_layer_names(&layers)
-        .enabled_extension_names(&extensions);
-    
-      let ash_instance = ash_entry
-        .create_instance(&vk_instance_create_info, None)
-        .map_err(|e| format!("at instance create: {e}"))?;
-
-      let vk_gpus = ash_instance
-        .enumerate_physical_devices()
-        .map_err(|e| format!("at getting GPU list: {e}"))?;
-
-      Ok(Self { vk_gpus, ash_instance, ash_entry })
-    }
-  }
-
-  fn get_gpu_infos(&self) -> Vec<rhi::GPUInfo> {
-    unsafe {
-      self
-        .vk_gpus
-        .iter()
-        .enumerate()
-        .map(|(i, gpu)| {
-          let props = self.ash_instance.get_physical_device_properties(*gpu);
-          rhi::GPUInfo{
-            id: i as _,
-            name: props
-              .device_name_as_c_str()
-              .unwrap_or(c"Unknown Device")
-              .to_string_lossy()
-              .to_string(),
-            integrated: props.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU,
-          }
-        })
-        .collect()
-    }
-  }
-
-  fn init_backend(self, gpu_id: u32) -> Result<VulkanBackend, String> {
-    let gpu = self.vk_gpus[gpu_id as usize];
-    unsafe {
-      let gpu_queue_family_props =
-        self.ash_instance.get_physical_device_queue_family_properties(*gpu);
-      let graphics_queue_family_id = gpu_queue_family_props
-        .iter()
-        .enumerate()
-        .filter(|(_, x)| x.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-        .max_by_key(|(_, x)| x.queue_count)
-        .map(|(x, _)| x as u32)
-        .ok_or("no suitable GPU graphics queue found".to_string())?;
-      let device_extensions = [
-        khr::swapchain::NAME.as_ptr(),
-        #[cfg(target_os = "macos")]
-        khr::portability_subset::NAME.as_ptr(),
-      ];
-      let device_create_info = vk::DeviceCreateInfo::default()
-        .queue_create_infos(&[
-          vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(graphics_queue_family_id)
-            .queue_priorities(&[1.0])
-        ])
-        .enabled_extension_names(&device_extensions)
-        .enabled_features(&vk::PhysicalDeviceFeatures::default());
-      let ash_device = self
-        .ash_instance
-        .create_device(gpu, &device_create_info, None)
-        .map_err(|e| format!("at vk device create: {e}"))?;
-      let graphics_queue = ash_device.get_device_queue(graphics_queue_family_id, 0);
-      let allocator = Allocator::new(
-        &AllocatorCreateDesc {
-          instance: self.ash_instance.clone(),
-          device: ash_device.clone(),
-          physical_device: gpu,
-          debug_settings: Default::default(),
-          buffer_device_address: false,
-          allocation_sizes: Default::default(),
-        }
-      )
-        .map_err(|e| format!("at allocator create: {e}"))?;
-
-      let mut pool_create_info = vk::DescriptorPoolCreateInfo::default()
-        .flags(
-          vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND |
-          vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET
-        )
-        .pool_sizes(
-          &[
-            vk::DescriptorPoolSize::default()
-              .ty(vk::DescriptorType::STORAGE_BUFFER)
-              .descriptor_count(512),
-            vk::DescriptorPoolSize::default()
-              .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-              .descriptor_count(8192),
-          ]
-        )
-        .max_sets(512);
-      let descriptor_pool = unsafe {
-        ash_device
-          .create_descriptor_pool(&pool_create_info, None)
-          .map_err(|e| format!("at vk descriptor pool create: {e}"))?
-      };
-
-      Ok(VulkanBackend {
-        descriptor_sets: SequentialIDStore::new(512),
-        frame_buffers: SequentialIDStore::new(256),
-        pipelines: SequentialIDStore::new(32),
-        images: SequentialIDStore::new(1024),
-        buffers: SequentialIDStore::new(1024),
-        allocator,
-        descriptor_pool,
-        graphics_queue,
-        graphics_queue_family_id,
-        gpu,
-        ash_device,
-        ash_instance: self.ash_instance,
-      })
-    }
-  }
+pub struct SwapchainVK {
+  swapchain: vk::SwapchainKHR,
+  surface: vk::SurfaceKHR,
+  res: vk::Extent2D,
+  color_space: vk::ColorSpaceKHR,
+  present_mode: vk::PresentModeKHR,
+  image_count: u32,
 }
 
 pub struct VulkanBackend {
-  descriptor_sets: SequentialIDStore<BindlessDescriptorSets>,
-  frame_buffers: SequentialIDStore<vk::Framebuffer>,
+  command_buffers: SequentialIDStore<vk::CommandBuffer>,
+  command_pool: vk::CommandPool,
+  fences: SequentialIDStore<vk::Fence>,
+  descriptor_sets: SequentialIDStore<InputSetVK>,
+  frame_buffers: SequentialIDStore<FramebufferVK>,
   pipelines: SequentialIDStore<GraphicsPipeline>,
   images: SequentialIDStore<AllocatedTexture>,
   buffers: SequentialIDStore<AllocatedBuffer>,
@@ -319,8 +183,12 @@ pub struct VulkanBackend {
   graphics_queue: vk::Queue,
   graphics_queue_family_id: u32,
   gpu: vk::PhysicalDevice,
+  swapchain: SwapchainVK,
+  swapchain_device: khr::swapchain::Device,
   ash_device: ash::Device,
+  surface_instance: khr::surface::Instance,
   ash_instance: ash::Instance,
+  ash_entry: ash::Entry,
 }
 
 impl VulkanBackend {
@@ -399,6 +267,134 @@ impl VulkanBackend {
 }
 
 impl rhi::RenderBackend for VulkanBackend {
+  fn new(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Result<Self, String> {
+    unsafe {
+      let (ash_entry, ash_instance) = helpers::create_vk_instance()?;
+      let vk_gpus = ash_instance
+        .enumerate_physical_devices()
+        .map_err(|e| format!("at getting GPU list: {e}"))?;
+      let gpu_info = vk_gpus
+        .into_iter()
+        .map(|gpu| {
+          let props = ash_instance.get_physical_device_properties(gpu);
+          (
+            gpu,
+            props
+              .device_name_as_c_str()
+              .unwrap_or(c"Unknown Device")
+              .to_string_lossy()
+              .to_string(),
+            props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU,
+          )
+        })
+        .collect::<Vec<_>>();
+      if gpu_info.is_empty() {
+        return Err(String::from("no GPU found"));
+      }
+      let gpu = gpu_info.iter().find(|info| {info.2}).map(|x| x.0).unwrap_or(gpu_info[0].0);
+
+      let gpu_queue_family_props = ash_instance.get_physical_device_queue_family_properties(gpu);
+      let graphics_queue_family_id = gpu_queue_family_props
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        .max_by_key(|(_, x)| x.queue_count)
+        .map(|(x, _)| x as u32)
+        .ok_or("no suitable GPU graphics queue found".to_string())?;
+      let device_extensions = [
+        khr::swapchain::NAME.as_ptr(),
+        #[cfg(target_os = "macos")]
+        khr::portability_subset::NAME.as_ptr(),
+      ];
+      let device_create_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&[
+          vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(graphics_queue_family_id)
+            .queue_priorities(&[1.0])
+        ])
+        .enabled_extension_names(&device_extensions)
+        .enabled_features(&vk::PhysicalDeviceFeatures::default());
+      let ash_device = ash_instance
+        .create_device(gpu, &device_create_info, None)
+        .map_err(|e| format!("at vk device create: {e}"))?;
+      let graphics_queue = ash_device.get_device_queue(graphics_queue_family_id, 0);
+      let surface_instance = khr::surface::Instance::new(&ash_entry, &ash_instance);
+      let surface = ash_window::create_surface(
+        &ash_entry,
+        &ash_instance,
+        window.display_handle().map_err(|_| "invalid window".to_string())?.as_raw(),
+        window.window_handle().map_err(|_| "invalid window".to_string())?.as_raw(),
+        None
+      )
+        .map_err(|e| format!("at surface creation: {e}"))?;
+      let swapchain_device = khr::swapchain::Device::new(&ash_instance, &ash_device);
+
+      let allocator = Allocator::new(
+        &AllocatorCreateDesc {
+          instance: ash_instance.clone(),
+          device: ash_device.clone(),
+          physical_device: gpu,
+          debug_settings: Default::default(),
+          buffer_device_address: false,
+          allocation_sizes: Default::default(),
+        }
+      )
+        .map_err(|e| format!("at allocator create: {e}"))?;
+
+      let pool_create_info = vk::DescriptorPoolCreateInfo::default()
+        .flags(
+          vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND |
+            vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET
+        )
+        .pool_sizes(
+          &[
+            vk::DescriptorPoolSize::default()
+              .ty(vk::DescriptorType::STORAGE_BUFFER)
+              .descriptor_count(512),
+            vk::DescriptorPoolSize::default()
+              .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+              .descriptor_count(8192),
+          ]
+        )
+        .max_sets(512);
+      let descriptor_pool = ash_device
+        .create_descriptor_pool(&pool_create_info, None)
+        .map_err(|e| format!("at vk descriptor pool create: {e}"))?;
+      let command_pool_info = vk::CommandPoolCreateInfo::default()
+        .queue_family_index(graphics_queue_family_id)
+        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+      let command_pool = ash_device
+        .create_command_pool(&command_pool_info, None)
+        .map_err(|e| format!("at command pool create: {e}"))?;
+
+      Ok(Self {
+        command_buffers: SequentialIDStore::new(256),
+        command_pool,
+        fences: SequentialIDStore::new(256),
+        descriptor_sets: SequentialIDStore::new(512),
+        frame_buffers: SequentialIDStore::new(256),
+        pipelines: SequentialIDStore::new(32),
+        images: SequentialIDStore::new(1024),
+        buffers: SequentialIDStore::new(1024),
+        allocator,
+        descriptor_pool,
+        graphics_queue,
+        graphics_queue_family_id,
+        gpu,
+        swapchain,
+        swapchain_device,
+        ash_device,
+        surface_instance,
+        ash_instance,
+        ash_entry,
+      })
+    }
+  }
+
+  fn get_swapchain_info(&self) -> SwapchainInfo {
+    todo!()
+  }
+
   fn create_buffer(
     &mut self,
     size: u64,
@@ -627,13 +623,12 @@ impl rhi::RenderBackend for VulkanBackend {
   ) -> Result<rhi::FramebufferID, String>{
     unsafe {
       let g_pipeline = self.pipelines.get_obj(pipeline_id.0)?;
-      let mut attachments = color_attachments
+      let mut attachment_ids = color_attachments.clone();
+      depth_attachment.map(|d| attachment_ids.push(d));
+      let attachments = attachment_ids
         .iter()
         .map(|x| self.images.get_obj(x.0).map(|img| img.view))
         .collect::<Result<Vec<_>, &str>>()?;
-      if let Some(depth_attach_id) = depth_attachment{
-        attachments.push(self.images.get_obj(depth_attach_id.0).map(|img| img.view)?);
-      }
       let res = self.images.get_obj(color_attachments[0].0)?.resolution;
       let fb_create_info = vk::FramebufferCreateInfo::default()
         .render_pass(g_pipeline.render_pass)
@@ -644,6 +639,7 @@ impl rhi::RenderBackend for VulkanBackend {
       let frame_buffer = self
         .ash_device
         .create_framebuffer(&fb_create_info, None)
+        .map(|x| FramebufferVK{framebuffer: x, color_attachments, depth_attachment})
         .map_err(|e| format!("at create framebuffer: {e}"))?;
       let fb_id_u32 = self.frame_buffers.add_obj(frame_buffer)?;
       Ok(rhi::FramebufferID(fb_id_u32))
@@ -668,7 +664,12 @@ impl rhi::RenderBackend for VulkanBackend {
         .map_err(|e| format!("at allocate buffer descriptor set: {e}"))?;
       let buffer_set = desc_sets[0];
       let texture_set = desc_sets[1];
-      let b_descriptor_sets = BindlessDescriptorSets{ buffer_set, texture_set };
+      let b_descriptor_sets = InputSetVK {
+        buffer_set,
+        texture_set,
+        bound_buffers: vec![],
+        bound_textures: vec![]
+      };
       let bds_id_u32 = self.descriptor_sets.add_obj(b_descriptor_sets)?;
       Ok(rhi::InputSetID(bds_id_u32))
     }
@@ -719,5 +720,190 @@ impl rhi::RenderBackend for VulkanBackend {
       );
     }
     Ok(())
+  }
+
+  fn create_fence(&mut self, signaled: bool) -> Result<rhi::FenceID, String> {
+    unsafe {
+      let fence_create_flags = if signaled {
+        vk::FenceCreateFlags::SIGNALED
+      } else {
+        vk::FenceCreateFlags::empty()
+      };
+      let fence_vk = self
+        .ash_device
+        .create_fence(&vk::FenceCreateInfo::default().flags(fence_create_flags), None)
+        .map_err(|e| format!("at create fence: {e}"))?;
+      let fence_id_u32 = self.fences.add_obj(fence_vk)?;
+      Ok(rhi::FenceID(fence_id_u32))
+    }
+  }
+
+  async fn wait_for_fence(&self, fence_id: rhi::FenceID) -> Result<(), String> {
+    unsafe {
+      let fence = self.fences.get_obj(fence_id.0)?;
+      self
+        .ash_device
+        .wait_for_fences(&[*fence], true, u64::MAX)
+        .map_err(|e| format!("at wait_for_fence: {e}"))
+    }
+  }
+
+  fn create_command_buffer(&mut self) -> Result<rhi::CommandBufferID, String> {
+    unsafe {
+      let command_buffer = self
+        .ash_device
+        .allocate_command_buffers(
+          &vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1)
+        )
+        .map_err(|e| format!("at allocate command buffers: {e}"))?
+        .remove(0);
+      let cmd_buffer_id_u32 = self.command_buffers.add_obj(command_buffer)?;
+      Ok(rhi::CommandBufferID(cmd_buffer_id_u32))
+    }
+  }
+
+  fn compile_commands(&self, command_buffer: rhi::CommandBufferID, commands: Vec<rhi::GPUCommands>) -> Result<(), String> {
+    // Figure out image layout transitions
+    let mut image_needed_state = HashMap::new();
+    for (i, command) in commands.iter().enumerate() {
+      match command {
+        rhi::GPUCommands::CopyBufferToBuffer { .. } => {}
+        rhi::GPUCommands::CopyBufferToImage { src, dst } => {
+          image_needed_state
+            .entry(*dst)
+            .or_insert(HashMap::new())
+            .insert(i, (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags::TRANSFER));
+        }
+        rhi::GPUCommands::BlitImage { src, dst } => {
+          image_needed_state
+            .entry(*src)
+            .or_insert(HashMap::new())
+            .insert(i, (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::PipelineStageFlags::TRANSFER));
+          image_needed_state
+            .entry(*dst)
+            .or_insert(HashMap::new())
+            .insert(i, (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags::TRANSFER));
+        }
+        rhi::GPUCommands::RunGraphicsPipeline { pipeline, framebuffer, input_set, draw_infos } => {
+          let frame_buffer_vk = self.frame_buffers.get_obj(framebuffer.0)?;
+          for att_id in frame_buffer_vk.color_attachments.iter() {
+            image_needed_state
+              .entry(*att_id)
+              .or_insert(HashMap::new())
+              .insert(i, (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+              ));
+          }
+          if let Some(att_id) = frame_buffer_vk.depth_attachment.as_ref() {
+            image_needed_state
+              .entry(*att_id)
+              .or_insert(HashMap::new())
+              .insert(i, (
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+              ));
+          }
+          let input_set_vk = self.descriptor_sets.get_obj(input_set.0)?;
+          for tex_id in input_set_vk.bound_textures.iter() {
+            image_needed_state
+              .entry(*tex_id)
+              .or_insert(HashMap::new())
+              .insert(i, (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::PipelineStageFlags::FRAGMENT_SHADER
+              ));
+          }
+        }
+      }
+    };
+    // Fill command buffer
+    let command_buffer_vk = self.command_buffers.get_obj(command_buffer.0)?.clone();
+    unsafe {
+      self
+        .ash_device
+        .begin_command_buffer(command_buffer_vk, &vk::CommandBufferBeginInfo::default())
+        .map_err(|e| format!("at begin_command_buffer: {e}"))?;
+      for (i, command) in commands.iter().enumerate() {
+        match command {
+          rhi::GPUCommands::CopyBufferToBuffer { src, dst } => {
+            let src_buffer_vk = self.buffers.get_obj(src.0)?;
+            let dst_buffer_vk = self.buffers.get_obj(dst.0)?;
+            self.ash_device.cmd_copy_buffer(
+              command_buffer_vk,
+              src_buffer_vk.buffer,
+              dst_buffer_vk.buffer,
+              &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(src_buffer_vk.size)]
+            );
+          }
+          rhi::GPUCommands::CopyBufferToImage { .. } => {}
+          rhi::GPUCommands::BlitImage { .. } => {}
+          rhi::GPUCommands::RunGraphicsPipeline { .. } => {}
+        }
+        for (img, states) in image_needed_state.iter() {
+          let img_vk = self.images.get_obj(img.0)?;
+          let Some(curr_state) = states.get(&i).cloned() else { continue };
+          let prev_state = if i > 0{
+             states
+              .get(&(i - 1))
+              .cloned()
+              .unwrap_or((curr_state.0, vk::PipelineStageFlags::BOTTOM_OF_PIPE))
+          } else {
+            (curr_state.0, vk::PipelineStageFlags::BOTTOM_OF_PIPE)
+          };
+          self.ash_device.cmd_pipeline_barrier(
+            command_buffer_vk,
+            prev_state.1,
+            curr_state.1,
+            vk::DependencyFlags::BY_REGION,
+            &[],
+            &[],
+            &[
+              vk::ImageMemoryBarrier::default()
+                .image(img_vk.image)
+                .old_layout(prev_state.0)
+                .new_layout(curr_state.0)
+                .src_queue_family_index(self.graphics_queue_family_id)
+                .dst_queue_family_index(self.graphics_queue_family_id)
+                .subresource_range(
+                  vk::ImageSubresourceRange::default()
+                    .aspect_mask(get_aspect_mask(img_vk.format))
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                )
+            ]
+          );
+        }
+      };
+      self
+        .ash_device
+        .end_command_buffer(command_buffer_vk)
+        .map_err(|e| format!("at end_command_buffer: {e}"))?;
+    }
+    Ok(())
+  }
+
+  fn run_commands(
+    &self,
+    command_buffer: rhi::CommandBufferID,
+    fence_id: rhi::FenceID
+  ) -> Result<(), String> {
+    let command_buffer_vk = self.command_buffers.get_obj(command_buffer.0)?.clone();
+    let fence_vk = self.fences.get_obj(fence_id.0)?;
+    unsafe {
+      self
+        .ash_device
+        .queue_submit(
+          self.graphics_queue,
+          &[vk::SubmitInfo::default().command_buffers(&[command_buffer_vk])],
+          *fence_vk
+        )
+        .map_err(|e| format!("at submit queue submit: {e}"))
+    }
   }
 }

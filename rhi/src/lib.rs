@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use bitflags::bitflags;
+pub use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 #[derive(Debug, Clone)]
 pub struct GPUInfo{
@@ -12,6 +13,12 @@ pub struct GPUInfo{
 pub struct Resolution2D {
   pub width: u32,
   pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SwapchainInfo{
+  res: Resolution2D,
+  image_count: u32,
 }
 
 pub enum MemoryLocation{
@@ -116,12 +123,6 @@ pub enum DescriptorType {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DescriptorLayoutID(pub u32);
-
-#[derive(Debug, Clone, Copy)]
-pub struct DescriptorPoolID(pub u32);
-
-#[derive(Debug, Clone, Copy)]
 pub struct DescriptorSetID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
@@ -139,7 +140,13 @@ pub enum RasterStyle {
 #[derive(Debug, Clone, Copy)]
 pub struct InputSetID(pub u32);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
+pub struct FenceID(pub u32);
+
+#[derive(Debug, Clone, Copy)]
+pub struct CommandBufferID(pub u32);
+
+#[derive(Debug, Clone, Copy)]
 pub struct DrawInfo{
   offset: u32,
   count: u32,
@@ -158,17 +165,10 @@ pub enum GPUCommands{
   },
 }
 
-#[trait_variant::make(RenderBackendInitializer: Send)]
-pub trait LocalRenderBackendInitializer<T> where T: RenderBackend + Sized {
-  fn new() -> Result<Self, String> where Self: Sized;
-
-  fn get_gpu_infos(&self) -> Vec<GPUInfo>;
-
-  async fn init_backend(self, gpu_id: u32) -> Result<T, String>;
-}
-
 #[trait_variant::make(RenderBackend: Send)]
 pub trait LocalRenderBackend {
+  fn new(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Result<Self, String>;
+  fn get_swapchain_info(&self) -> SwapchainInfo;
   fn create_buffer(
     &mut self,
     size: u64,
@@ -210,4 +210,18 @@ pub trait LocalRenderBackend {
     buffers: Vec<BufferID>,
     textures: Vec<ImageID>
   ) -> Result<(), String>;
+
+  fn create_fence(&mut self, signaled: bool) -> Result<FenceID, String>;
+
+  async fn wait_for_fence(&self, fence_id: FenceID) -> Result<(), String>;
+
+  fn create_command_buffer(&mut self) -> Result<CommandBufferID, String>;
+
+  fn compile_commands(
+    &self,
+    command_buffer: CommandBufferID,
+    commands: Vec<GPUCommands>
+  ) -> Result<(), String>;
+
+  fn run_commands(&self, command_buffer: CommandBufferID, fence_id: FenceID) -> Result<(), String>;
 }
