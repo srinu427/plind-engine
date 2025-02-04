@@ -1,6 +1,7 @@
 mod helpers;
 
 use std::collections::HashMap;
+use std::io::BufReader;
 use std::path::PathBuf;
 pub use rhi;
 use ash::{vk, khr};
@@ -192,81 +193,6 @@ pub struct VulkanBackend {
 }
 
 impl VulkanBackend {
-  fn destroy_image(&mut self, image_id: rhi::ImageID) -> Result<(), String> {
-    let rhi::ImageID(image_id) = image_id;
-    let a_image = self.images.remove_obj(image_id)?;
-    unsafe {
-      self.ash_device.destroy_image_view(a_image.view, None);
-      self.ash_device.destroy_image(a_image.image, None);
-      a_image.allocation.map(|a| self.allocator.free(a));
-    }
-    Ok(())
-  }
-
-  fn destroy_buffer(&mut self, buffer_id: rhi::BufferID) -> Result<(), String> {
-    let rhi::BufferID(buffer_id) = buffer_id;
-    let a_buffer = self.buffers.remove_obj(buffer_id)?;
-    unsafe {
-      self.ash_device.destroy_buffer(a_buffer.buffer, None);
-      a_buffer.allocation.map(|a| self.allocator.free(a));
-    }
-    Ok(())
-  }
-
-  unsafe fn create_render_pass(
-    &self,
-    color_attachment_formats: &[rhi::ImageFormat],
-    depth_attachment_formats: Option<&rhi::ImageFormat>,
-  ) -> Result<vk::RenderPass, String> {
-    let mut attachments = color_attachment_formats
-      .into_iter()
-      .map(|x| vk::AttachmentDescription::default()
-        .format(translate_image_format(*x))
-        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .samples(vk::SampleCountFlags::TYPE_1)
-      )
-      .collect::<Vec<_>>();
-    depth_attachment_formats.map(|x| attachments.push(
-      vk::AttachmentDescription::default()
-        .format(translate_image_format(*x))
-        .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-        .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
-        .stencil_store_op(vk::AttachmentStoreOp::STORE)
-        .samples(vk::SampleCountFlags::TYPE_1)
-    ));
-    let mut subpass_desc = vk::SubpassDescription::default()
-      .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-      .color_attachments(
-        &(0..color_attachment_formats.len() as u32)
-          .map(|i| vk::AttachmentReference::default()
-            .attachment(i)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-          )
-          .collect::<Vec<_>>()
-      );
-    let subpass_desc = match depth_attachment_formats {
-      None => subpass_desc,
-      Some(_) => subpass_desc.depth_stencil_attachment(
-        &vk::AttachmentReference::default()
-          .attachment(color_attachment_formats.len() as _)
-          .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-      ),
-    };
-    let render_pass_create_info = vk::RenderPassCreateInfo::default()
-      .attachments(&attachments)
-      .subpasses(&[subpass_desc]);
-    self
-      .ash_device
-      .create_render_pass(&render_pass_create_info, None)
-      .map_err(|e| format!("at render pass creation: {e}"))
-  }
-}
-
-impl rhi::RenderBackend for VulkanBackend {
   fn new(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Result<Self, String> {
     unsafe {
       let (ash_entry, ash_instance) = helpers::create_vk_instance()?;
@@ -391,6 +317,82 @@ impl rhi::RenderBackend for VulkanBackend {
     }
   }
 
+  fn destroy_image(&mut self, image_id: rhi::ImageID) -> Result<(), String> {
+    let rhi::ImageID(image_id) = image_id;
+    let a_image = self.images.remove_obj(image_id)?;
+    unsafe {
+      self.ash_device.destroy_image_view(a_image.view, None);
+      self.ash_device.destroy_image(a_image.image, None);
+      a_image.allocation.map(|a| self.allocator.free(a));
+    }
+    Ok(())
+  }
+
+  fn destroy_buffer(&mut self, buffer_id: rhi::BufferID) -> Result<(), String> {
+    let rhi::BufferID(buffer_id) = buffer_id;
+    let a_buffer = self.buffers.remove_obj(buffer_id)?;
+    unsafe {
+      self.ash_device.destroy_buffer(a_buffer.buffer, None);
+      a_buffer.allocation.map(|a| self.allocator.free(a));
+    }
+    Ok(())
+  }
+
+  unsafe fn create_render_pass(
+    &self,
+    color_attachment_formats: &[rhi::ImageFormat],
+    depth_attachment_formats: Option<&rhi::ImageFormat>,
+  ) -> Result<vk::RenderPass, String> {
+    let mut attachments = color_attachment_formats
+      .into_iter()
+      .map(|x| vk::AttachmentDescription::default()
+        .format(translate_image_format(*x))
+        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .samples(vk::SampleCountFlags::TYPE_1)
+      )
+      .collect::<Vec<_>>();
+    depth_attachment_formats.map(|x| attachments.push(
+      vk::AttachmentDescription::default()
+        .format(translate_image_format(*x))
+        .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
+        .stencil_store_op(vk::AttachmentStoreOp::STORE)
+        .samples(vk::SampleCountFlags::TYPE_1)
+    ));
+    let subpass_color_attach_infos = (0..color_attachment_formats.len() as u32)
+      .map(|i| vk::AttachmentReference::default()
+        .attachment(i)
+        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+      )
+      .collect::<Vec<_>>();
+    let mut subpass_desc = vk::SubpassDescription::default()
+      .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+      .color_attachments(&subpass_color_attach_infos);
+    let subpass_desc = match depth_attachment_formats {
+      None => subpass_desc,
+      Some(_) => {
+        let depth_attach_refs = vk::AttachmentReference::default()
+          .attachment(color_attachment_formats.len() as _)
+          .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        subpass_desc.depth_stencil_attachment(&depth_attach_refs)},
+    };
+    let render_pass_create_info = vk::RenderPassCreateInfo::default()
+      .attachments(&attachments)
+      .subpasses(&[subpass_desc]);
+    self
+      .ash_device
+      .create_render_pass(&render_pass_create_info, None)
+      .map_err(|e| format!("at render pass creation: {e}"))
+  }
+}
+
+impl rhi::RenderBackend for VulkanBackend {
+  
+
   fn get_swapchain_info(&self) -> SwapchainInfo {
     todo!()
   }
@@ -411,6 +413,15 @@ impl rhi::RenderBackend for VulkanBackend {
         .create_buffer(&buffer_create_info, None)
         .map_err(|e| format!("at vk buffer create: {e}"))?;
       let memory_requirements = self.ash_device.get_buffer_memory_requirements(buffer);
+      let a_buffer = AllocatedBuffer{
+        buffer,
+        size,
+        allocation: None,
+      };
+      let buffer_id_u32 = self
+        .buffers
+        .add_obj(a_buffer)
+        .map_err(|e| format!("max buffer count reached: {e}"))?;
       let allocation = self
         .allocator
         .allocate(
@@ -422,15 +433,7 @@ impl rhi::RenderBackend for VulkanBackend {
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
           })
         .map_err(|e| format!("at allocator alloc: {e}"))?;
-      let a_buffer = AllocatedBuffer{
-        buffer,
-        size,
-        allocation: Some(allocation),
-      };
-      let buffer_id_u32 = self
-        .buffers
-        .add_obj(a_buffer)
-        .map_err(|e| format!("max buffer count reached: {e}"))?;
+      self.buffers.get_obj_mut(buffer_id_u32)?.allocation = Some(allocation);
       Ok(rhi::BufferID(buffer_id_u32))
     }
   }
@@ -455,18 +458,6 @@ impl rhi::RenderBackend for VulkanBackend {
         .ash_device
         .create_image(&image_create_info, None)
         .map_err(|e| format!("at vk image create: {e}"))?;
-      let memory_requirements = self.ash_device.get_image_memory_requirements(image);
-      let allocation = self
-        .allocator
-        .allocate(
-          &AllocationCreateDesc{
-            name: &format!("image_{image_id_u32}"),
-            requirements: memory_requirements,
-            location: translate_memory_location(memory_location),
-            linear: false,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-          })
-        .map_err(|e| format!("at allocator alloc: {e}"))?;
       let view = self
         .ash_device
         .create_image_view(
@@ -485,17 +476,30 @@ impl rhi::RenderBackend for VulkanBackend {
           None
         )
         .map_err(|e| format!("at view creation: {e}"))?;
+      let memory_requirements = self.ash_device.get_image_memory_requirements(image);
       let a_image = AllocatedTexture{
         image,
         view,
         resolution: res,
         format,
-        allocation: Some(allocation),
+        allocation: None,
       };
       let image_id_u32 = self
         .images
         .add_obj(a_image)
         .map_err(|e| format!("max image count reached: {e}"))?;
+      let allocation = self
+        .allocator
+        .allocate(
+          &AllocationCreateDesc{
+            name: &format!("image_{image_id_u32}"),
+            requirements: memory_requirements,
+            location: translate_memory_location(memory_location),
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+          })
+        .map_err(|e| format!("at allocator alloc: {e}"))?;
+      self.images.get_obj_mut(image_id_u32)?.allocation = Some(allocation);
       Ok(rhi::ImageID(image_id_u32))
     }
   }
@@ -546,9 +550,10 @@ impl rhi::RenderBackend for VulkanBackend {
         .create_pipeline_layout(&pipeline_layout_create_info, None)
         .map_err(|e| format!("at pipeline layout creation: {e}"))?;
       // Pipeline
-      let mut vert_fr =
-        fs::read(&vertex_shader).await.map_err(|e| format!("at read vertex shader file: {e}"))?;
-      let vert_data = ash::util::read_spv(&mut vert_fr[..])
+      let mut vert_fr = fs::read(&vertex_shader)
+        .await
+        .map_err(|e| format!("at read vertex shader file: {e}"))?;
+      let vert_data = ash::util::read_spv(&mut vert_fr)
         .map_err(|e| format!("at read vertex shader: {e}"))?;
       let vert_shader_vk = self.ash_device.create_shader_module(
         &vk::ShaderModuleCreateInfo::default().code(&vert_data),
@@ -601,7 +606,7 @@ impl rhi::RenderBackend for VulkanBackend {
           &[pipeline_create_info],
           None
         )
-        .map_err(|e| format!("at create pipeline: {}", *e.1))?
+        .map_err(|e| format!("at create pipeline: {}", e.1))?
         .remove(0);
       let g_pipeline = GraphicsPipeline{
         pipeline,
@@ -683,37 +688,37 @@ impl rhi::RenderBackend for VulkanBackend {
   ) -> Result<(), String> {
     unsafe {
       let b_desc_sets = self.descriptor_sets.get_obj(input_set.0)?;
+      let buffer_infos = buffers
+        .into_iter()
+        .map(|x| self.buffers.get_obj(x.0))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|x| vk::DescriptorBufferInfo::default()
+          .buffer(x.buffer)
+          .offset(0)
+          .range(vk::WHOLE_SIZE))
+        .collect::<Vec<_>>();
       let buffer_write_info = vk::WriteDescriptorSet::default()
         .dst_set(b_desc_sets.buffer_set)
         .dst_binding(0)
         .descriptor_type(translate_descriptor_type(rhi::DescriptorType::Storage))
         .descriptor_count(1)
-        .buffer_info(&buffers
-          .into_iter()
-          .map(|x| self.buffers.get_obj(x.0))
-          .collect::<Result<Vec<_>, _>>()?
-          .into_iter()
-          .map(|x| vk::DescriptorBufferInfo::default()
-            .buffer(x.buffer)
-            .offset(0)
-            .range(vk::WHOLE_SIZE))
-          .collect::<Vec<_>>()
-        );
+        .buffer_info(&buffer_infos);
+      let image_infos = textures
+        .into_iter()
+        .map(|x| self.images.get_obj(x.0))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|x| vk::DescriptorImageInfo::default()
+          .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+          .image_view(x.view))
+        .collect::<Vec<_>>();
       let texture_write_info = vk::WriteDescriptorSet::default()
         .dst_set(b_desc_sets.texture_set)
         .dst_binding(0)
         .descriptor_type(translate_descriptor_type(rhi::DescriptorType::Sampler2D))
         .descriptor_count(1)
-        .image_info(&textures
-          .into_iter()
-          .map(|x| self.images.get_obj(x.0))
-          .collect::<Result<Vec<_>, _>>()?
-          .into_iter()
-          .map(|x| vk::DescriptorImageInfo::default()
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image_view(x.view))
-          .collect::<Vec<_>>()
-        );
+        .image_info(&image_infos);
       self.ash_device.update_descriptor_sets(
         &[buffer_write_info, texture_write_info],
         &[]

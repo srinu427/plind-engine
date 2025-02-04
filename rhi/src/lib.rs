@@ -85,7 +85,7 @@ pub enum ImageSampleCount {
   E16,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImageID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
@@ -167,7 +167,6 @@ pub enum GPUCommands{
 
 #[trait_variant::make(RenderBackend: Send)]
 pub trait LocalRenderBackend {
-  fn new(window: &(impl HasWindowHandle + HasDisplayHandle)) -> Result<Self, String>;
   fn get_swapchain_info(&self) -> SwapchainInfo;
   fn create_buffer(
     &mut self,
