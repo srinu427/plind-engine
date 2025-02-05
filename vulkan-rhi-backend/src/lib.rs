@@ -1,7 +1,6 @@
 mod helpers;
 
 use std::collections::HashMap;
-use std::io::BufReader;
 use std::path::PathBuf;
 pub use rhi;
 use ash::{vk, khr};
@@ -13,7 +12,7 @@ use gpu_allocator::vulkan::{
   Allocator,
   AllocatorCreateDesc
 };
-use rhi::{HasDisplayHandle, HasWindowHandle, SwapchainInfo};
+use rhi::{HasDisplayHandle, HasWindowHandle};
 use seq_id_store::SequentialIDStore;
 use tokio::fs;
 
@@ -24,6 +23,7 @@ fn translate_memory_location(memory_location: rhi::MemoryLocation) -> MemoryLoca
     rhi::MemoryLocation::Shared => {MemoryLocation::CpuToGpu}
   }
 }
+
 fn translate_image_format(format: rhi::ImageFormat) -> vk::Format {
   match format {
     rhi::ImageFormat::Texture => {vk::Format::R8G8B8A8_UNORM}
@@ -95,9 +95,9 @@ fn translate_shader_stage_flags(
   flags
 }
 
-fn translate_raster_style(
+fn translate_raster_style<'a>(
   raster_style: rhi::RasterStyle
-) -> vk::PipelineRasterizationStateCreateInfo{
+) -> vk::PipelineRasterizationStateCreateInfo<'a>{
   match raster_style {
     rhi::RasterStyle::Fill => {
       vk::PipelineRasterizationStateCreateInfo::default()
@@ -123,6 +123,24 @@ fn get_aspect_mask(format: rhi::ImageFormat) -> vk::ImageAspectFlags {
     rhi::ImageFormat::Depth => { vk::ImageAspectFlags::DEPTH }
     rhi::ImageFormat::RenderIntermediate => { vk::ImageAspectFlags::COLOR }
     rhi::ImageFormat::Presentation => { vk::ImageAspectFlags::COLOR }
+  }
+}
+
+fn infer_access_from_layout(layout: vk::ImageLayout) -> vk::AccessFlags{
+  if layout == vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL{
+    vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+  } else if layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL{
+    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+  } else if layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL{
+    vk::AccessFlags::SHADER_READ
+  } else if layout == vk::ImageLayout::TRANSFER_SRC_OPTIMAL {
+    vk::AccessFlags::TRANSFER_READ
+  } else if layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL {
+    vk::AccessFlags::TRANSFER_WRITE
+  } else if layout == vk::ImageLayout::UNDEFINED {
+    vk::AccessFlags::NONE
+  } else {
+    vk::AccessFlags::NONE
   }
 }
 
@@ -161,15 +179,6 @@ pub struct FramebufferVK {
   depth_attachment: Option<rhi::ImageID>,
 }
 
-pub struct SwapchainVK {
-  swapchain: vk::SwapchainKHR,
-  surface: vk::SurfaceKHR,
-  res: vk::Extent2D,
-  color_space: vk::ColorSpaceKHR,
-  present_mode: vk::PresentModeKHR,
-  image_count: u32,
-}
-
 pub struct VulkanBackend {
   command_buffers: SequentialIDStore<vk::CommandBuffer>,
   command_pool: vk::CommandPool,
@@ -184,7 +193,10 @@ pub struct VulkanBackend {
   graphics_queue: vk::Queue,
   graphics_queue_family_id: u32,
   gpu: vk::PhysicalDevice,
-  swapchain: SwapchainVK,
+  swapchain_images: Vec<AllocatedTexture>,
+  swapchain: vk::SwapchainKHR,
+  swapchain_res: vk::Extent2D,
+  surface_format: vk::SurfaceFormatKHR,
   swapchain_device: khr::swapchain::Device,
   ash_device: ash::Device,
   surface_instance: khr::surface::Instance,
@@ -232,16 +244,19 @@ impl VulkanBackend {
         #[cfg(target_os = "macos")]
         khr::portability_subset::NAME.as_ptr(),
       ];
-      let device_create_info = vk::DeviceCreateInfo::default()
-        .queue_create_infos(&[
-          vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(graphics_queue_family_id)
-            .queue_priorities(&[1.0])
-        ])
-        .enabled_extension_names(&device_extensions)
-        .enabled_features(&vk::PhysicalDeviceFeatures::default());
       let ash_device = ash_instance
-        .create_device(gpu, &device_create_info, None)
+        .create_device(
+          gpu,
+          &vk::DeviceCreateInfo::default()
+          .queue_create_infos(&[
+            vk::DeviceQueueCreateInfo::default()
+              .queue_family_index(graphics_queue_family_id)
+              .queue_priorities(&[1.0])
+          ])
+          .enabled_extension_names(&device_extensions)
+          .enabled_features(&vk::PhysicalDeviceFeatures::default()),
+          None
+        )
         .map_err(|e| format!("at vk device create: {e}"))?;
       let graphics_queue = ash_device.get_device_queue(graphics_queue_family_id, 0);
       let surface_instance = khr::surface::Instance::new(&ash_entry, &ash_instance);
@@ -267,24 +282,26 @@ impl VulkanBackend {
       )
         .map_err(|e| format!("at allocator create: {e}"))?;
 
-      let pool_create_info = vk::DescriptorPoolCreateInfo::default()
-        .flags(
-          vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND |
-            vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET
-        )
-        .pool_sizes(
-          &[
-            vk::DescriptorPoolSize::default()
-              .ty(vk::DescriptorType::STORAGE_BUFFER)
-              .descriptor_count(512),
-            vk::DescriptorPoolSize::default()
-              .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-              .descriptor_count(8192),
-          ]
-        )
-        .max_sets(512);
       let descriptor_pool = ash_device
-        .create_descriptor_pool(&pool_create_info, None)
+        .create_descriptor_pool(
+          &vk::DescriptorPoolCreateInfo::default()
+          .flags(
+            vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND |
+            vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET
+          )
+          .pool_sizes(
+            &[
+              vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(512),
+              vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(8192),
+            ]
+          )
+          .max_sets(512),
+          None
+        )
         .map_err(|e| format!("at vk descriptor pool create: {e}"))?;
       let command_pool_info = vk::CommandPoolCreateInfo::default()
         .queue_family_index(graphics_queue_family_id)
@@ -292,6 +309,37 @@ impl VulkanBackend {
       let command_pool = ash_device
         .create_command_pool(&command_pool_info, None)
         .map_err(|e| format!("at command pool create: {e}"))?;
+      let (swapchain_res, surface_format, swapchain_image_count, swapchain) =
+        helpers::make_swapchain(gpu, &surface_instance, surface, &swapchain_device)?;
+      let swapchain_images_vk = swapchain_device
+        .get_swapchain_images(swapchain)
+        .map_err(|e| format!("at getting swapchain images: {e}"))?;
+      let swapchain_image_views = swapchain_images_vk.iter().map(|x| {
+        ash_device.create_image_view(
+          &vk::ImageViewCreateInfo::default()
+            .image(*x)
+            .format(surface_format.format)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .subresource_range(
+              vk::ImageSubresourceRange::default()
+                .aspect_mask(get_aspect_mask(rhi::ImageFormat::Presentation))
+                .base_array_layer(0)
+                .layer_count(1)
+                .base_mip_level(0)
+                .level_count(1)
+            ),
+          None
+        ).map_err(|e| format!("at swapchain image view: {e}"))
+      }).collect::<Result<Vec<_>, String>>()?;
+      let swapchain_images = (0..swapchain_images_vk.len())
+        .map(|i| AllocatedTexture{
+          image: swapchain_images_vk[i],
+          view: swapchain_image_views[i],
+          resolution: rhi::Resolution2D { width: swapchain_res.width, height: swapchain_res.height },
+          format: rhi::ImageFormat::Presentation,
+          allocation: None
+        })
+        .collect::<Vec<_>>();
 
       Ok(Self {
         command_buffers: SequentialIDStore::new(256),
@@ -307,7 +355,10 @@ impl VulkanBackend {
         graphics_queue,
         graphics_queue_family_id,
         gpu,
+        swapchain_images,
         swapchain,
+        swapchain_res,
+        surface_format,
         swapchain_device,
         ash_device,
         surface_instance,
@@ -374,7 +425,7 @@ impl VulkanBackend {
         .attachment(color_attachment_formats.len() as _)
         .layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
       );
-    let mut subpass_desc = vk::SubpassDescription::default()
+    let subpass_desc = vk::SubpassDescription::default()
       .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
       .color_attachments(&subpass_color_attach_infos);
     let subpass_desc = match subpass_depth_attach_info.as_ref() {
@@ -394,10 +445,11 @@ impl VulkanBackend {
 }
 
 impl rhi::RenderBackend for VulkanBackend {
-  
-
-  fn get_swapchain_info(&self) -> SwapchainInfo {
-    todo!()
+  fn get_swapchain_info(&self) -> rhi::SwapchainInfo {
+    rhi::SwapchainInfo{
+      res: rhi::Resolution2D{width: self.swapchain_res.width, height: self.swapchain_res.height},
+      image_count: self.swapchain_images.len() as _,
+    }
   }
 
   fn create_buffer(
@@ -524,36 +576,39 @@ impl rhi::RenderBackend for VulkanBackend {
         depth_attachment_formats.as_ref()
       )?;
       // Pipeline layout
+      let buffer_dset_bindings = [
+        vk::DescriptorSetLayoutBinding::default()
+          .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+          .descriptor_count(max_buffer_count)
+          .stage_flags(vk::ShaderStageFlags::ALL)
+      ];
       let buffer_set_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-        .bindings(&[
-          vk::DescriptorSetLayoutBinding::default()
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(max_buffer_count)
-            .stage_flags(vk::ShaderStageFlags::ALL)
-        ]);
+        .bindings(&buffer_dset_bindings);
       let buffer_set_layout = self
         .ash_device
         .create_descriptor_set_layout(&buffer_set_layout_info, None)
         .map_err(|e| format!("at buffer set layout creation: {e}"))?;
+      let texture_dset_bindings = [
+        vk::DescriptorSetLayoutBinding::default()
+          .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+          .descriptor_count(max_texture_count)
+          .stage_flags(vk::ShaderStageFlags::ALL)
+      ];
       let texture_set_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-        .bindings(&[
-          vk::DescriptorSetLayoutBinding::default()
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(max_texture_count)
-            .stage_flags(vk::ShaderStageFlags::ALL)
-        ]);
+        .bindings(&texture_dset_bindings);
       let texture_set_layout = self
         .ash_device
         .create_descriptor_set_layout(&texture_set_layout_info, None)
         .map_err(|e| format!("at texture set layout creation: {e}"))?;
+      let pipeline_set_layouts = [buffer_set_layout, texture_set_layout];
       let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(&[buffer_set_layout, texture_set_layout]);
+        .set_layouts(&pipeline_set_layouts);
       let pipeline_layout = self
         .ash_device
         .create_pipeline_layout(&pipeline_layout_create_info, None)
         .map_err(|e| format!("at pipeline layout creation: {e}"))?;
       // Pipeline
-      let mut vert_fr = fs::read(&vertex_shader)
+      let vert_fr = fs::read(&vertex_shader)
         .await
         .map_err(|e| format!("at read vertex shader file: {e}"))?;
       let vert_data = ash::util::read_spv(&mut std::io::Cursor::new(&vert_fr))
@@ -563,7 +618,7 @@ impl rhi::RenderBackend for VulkanBackend {
         None
       )
         .map_err(|e| format!("at vert shader module creation: {e}"))?;
-      let mut frag_fr =
+      let frag_fr =
         fs::read(&fragment_shader).await.map_err(|e| format!("at read fragment shader file: {e}"))?;
       let frag_data = ash::util::read_spv(&mut std::io::Cursor::new(&frag_fr))
         .map_err(|e| format!("at read fragment shader: {e}"))?;
@@ -582,6 +637,17 @@ impl rhi::RenderBackend for VulkanBackend {
       let vp_state = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
         .scissor_count(1);
+      let raster_style_vk = translate_raster_style(raster_style);
+      let shader_stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+          .name(c"main")
+          .stage(vk::ShaderStageFlags::VERTEX)
+          .module(vert_shader_vk),
+        vk::PipelineShaderStageCreateInfo::default()
+          .name(c"main")
+          .stage(vk::ShaderStageFlags::FRAGMENT)
+          .module(frag_shader_vk),
+      ];
       let pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
         .render_pass(render_pass)
         .subpass(0)
@@ -591,17 +657,8 @@ impl rhi::RenderBackend for VulkanBackend {
         .dynamic_state(&dynamic_states)
         .multisample_state(&msaa_info)
         .viewport_state(&vp_state)
-        .rasterization_state(&translate_raster_style(raster_style))
-        .stages(&[
-          vk::PipelineShaderStageCreateInfo::default()
-            .name(c"main")
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_shader_vk),
-          vk::PipelineShaderStageCreateInfo::default()
-            .name(c"main")
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_shader_vk),
-        ]);
+        .rasterization_state(&raster_style_vk)
+        .stages(&shader_stages);
       let pipeline = self
         .ash_device
         .create_graphics_pipelines(
@@ -874,6 +931,8 @@ impl rhi::RenderBackend for VulkanBackend {
                 .image(img_vk.image)
                 .old_layout(prev_state.0)
                 .new_layout(curr_state.0)
+                .src_access_mask(infer_access_from_layout(prev_state.0))
+                .dst_access_mask(infer_access_from_layout(curr_state.0))
                 .src_queue_family_index(self.graphics_queue_family_id)
                 .dst_queue_family_index(self.graphics_queue_family_id)
                 .subresource_range(

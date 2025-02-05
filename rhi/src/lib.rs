@@ -17,8 +17,8 @@ pub struct Resolution2D {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SwapchainInfo{
-  res: Resolution2D,
-  image_count: u32,
+  pub res: Resolution2D,
+  pub image_count: u32,
 }
 
 pub enum MemoryLocation{

@@ -95,6 +95,7 @@ pub unsafe fn make_swapchain(
       )
       .image_array_layers(1),
     None
-  ).map_err(|e| format!("at swapchain creation: {e}"))?;
+  )
+    .map_err(|e| format!("at swapchain creation: {e}"))?;
   Ok((swapchain_res, surface_format, swapchain_img_count, swapchain))
 }
