@@ -369,20 +369,23 @@ impl VulkanBackend {
         .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
       )
       .collect::<Vec<_>>();
+    let subpass_depth_attach_info = depth_attachment_formats
+      .map(|_| vk::AttachmentReference::default()
+        .attachment(color_attachment_formats.len() as _)
+        .layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+      );
     let mut subpass_desc = vk::SubpassDescription::default()
       .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
       .color_attachments(&subpass_color_attach_infos);
-    let subpass_desc = match depth_attachment_formats {
+    let subpass_desc = match subpass_depth_attach_info.as_ref() {
       None => subpass_desc,
-      Some(_) => {
-        let depth_attach_refs = vk::AttachmentReference::default()
-          .attachment(color_attachment_formats.len() as _)
-          .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-        subpass_desc.depth_stencil_attachment(&depth_attach_refs)},
+      Some(x) => {
+        subpass_desc.depth_stencil_attachment(x)},
     };
+    let subpass_descs = [subpass_desc];
     let render_pass_create_info = vk::RenderPassCreateInfo::default()
       .attachments(&attachments)
-      .subpasses(&[subpass_desc]);
+      .subpasses(&subpass_descs);
     self
       .ash_device
       .create_render_pass(&render_pass_create_info, None)
@@ -553,7 +556,7 @@ impl rhi::RenderBackend for VulkanBackend {
       let mut vert_fr = fs::read(&vertex_shader)
         .await
         .map_err(|e| format!("at read vertex shader file: {e}"))?;
-      let vert_data = ash::util::read_spv(&mut vert_fr)
+      let vert_data = ash::util::read_spv(&mut std::io::Cursor::new(&vert_fr))
         .map_err(|e| format!("at read vertex shader: {e}"))?;
       let vert_shader_vk = self.ash_device.create_shader_module(
         &vk::ShaderModuleCreateInfo::default().code(&vert_data),
@@ -562,7 +565,7 @@ impl rhi::RenderBackend for VulkanBackend {
         .map_err(|e| format!("at vert shader module creation: {e}"))?;
       let mut frag_fr =
         fs::read(&fragment_shader).await.map_err(|e| format!("at read fragment shader file: {e}"))?;
-      let frag_data = ash::util::read_spv(&mut frag_fr[..])
+      let frag_data = ash::util::read_spv(&mut std::io::Cursor::new(&frag_fr))
         .map_err(|e| format!("at read fragment shader: {e}"))?;
       let frag_shader_vk = self.ash_device.create_shader_module(
         &vk::ShaderModuleCreateInfo::default().code(&frag_data),
