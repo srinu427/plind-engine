@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use rhi::{
   CommandBufferID,
   FenceID,
@@ -5,7 +7,6 @@ use rhi::{
   InputSetID,
   PipelineID,
   RenderBackend,
-  RenderBackendInitializer
 };
 
 pub struct MeshVertex{
@@ -21,27 +22,36 @@ pub struct MeshCPU{
   indices: Vec<u32>,
 }
 
-pub struct PbrRenderer{
+pub struct PbrRenderer<B: RenderBackend>{
   pipeline: PipelineID,
   input_sets: Vec<InputSetID>,
   framebuffers: Vec<FramebufferID>,
   command_buffers: Vec<CommandBufferID>,
   fences: Vec<FenceID>,
+  backend: Arc<Mutex<B>>
 }
 
-impl PbrRenderer{
-  pub async fn new(backend: &mut impl RenderBackend) -> Self{
-    backend.create_fence(false);
+impl<B: RenderBackend> PbrRenderer<B>{
+  pub fn new(backend: Arc<Mutex<B>>) -> Result<Self, String>{
+    let mut backend_lock = backend
+      .lock()
+      .map_err(|e| format!("at backend lock: {e}"))?;
+    let frame_count = backend_lock.get_swapchain_images().len();
+    let fences = (0..frame_count)
+      .map(|_| backend_lock.create_fence(false))
+      .collect::<Result<Vec<_>, String>>()?;
+    todo!();
   }
 }
 
 pub struct Renderer<B: RenderBackend>{
-  backend: B,
+  backend: Arc<Mutex<B>>,
   pbr_renderer: PbrRenderer,
 }
 
 impl<B: RenderBackend> Renderer<B>{
-  pub fn new(backend: impl RenderBackend) -> Result<Renderer<B>, String>{
-    Ok(Self{ backend })
+  pub fn new(backend: Arc<Mutex<B>>) -> Result<Renderer<B>, String>{
+    let pbr_renderer = PbrRenderer::new(&mut backend);
+    Ok(Self{ backend, pbr_renderer })
   }
 }

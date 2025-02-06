@@ -223,4 +223,10 @@ pub trait LocalRenderBackend {
   ) -> Result<(), String>;
 
   fn run_commands(&self, command_buffer: CommandBufferID, fence_id: FenceID) -> Result<(), String>;
+
+  fn get_swapchain_images(&self) -> Vec<ImageID>;
+
+  fn present_swapchain_image(&self, id:u32) -> Result<bool, String>;
+
+  fn acquire_present_image(&self, fence_id: FenceID) -> Result<u32, String>;
 }

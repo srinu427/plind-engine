@@ -193,7 +193,7 @@ pub struct VulkanBackend {
   graphics_queue: vk::Queue,
   graphics_queue_family_id: u32,
   gpu: vk::PhysicalDevice,
-  swapchain_images: Vec<AllocatedTexture>,
+  swapchain_images: Vec<rhi::ImageID>,
   swapchain: vk::SwapchainKHR,
   swapchain_res: vk::Extent2D,
   surface_format: vk::SurfaceFormatKHR,
@@ -331,15 +331,19 @@ impl VulkanBackend {
           None
         ).map_err(|e| format!("at swapchain image view: {e}"))
       }).collect::<Result<Vec<_>, String>>()?;
+      let mut images = SequentialIDStore::new(1024);
       let swapchain_images = (0..swapchain_images_vk.len())
-        .map(|i| AllocatedTexture{
-          image: swapchain_images_vk[i],
-          view: swapchain_image_views[i],
-          resolution: rhi::Resolution2D { width: swapchain_res.width, height: swapchain_res.height },
-          format: rhi::ImageFormat::Presentation,
-          allocation: None
+        .map(|i| {
+          let a_image = AllocatedTexture{
+            image: swapchain_images_vk[i],
+            view: swapchain_image_views[i],
+            resolution: rhi::Resolution2D { width: swapchain_res.width, height: swapchain_res.height },
+            format: rhi::ImageFormat::Presentation,
+            allocation: None
+          };
+          images.add_obj(a_image).map(rhi::ImageID)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, &str>>()?;
 
       Ok(Self {
         command_buffers: SequentialIDStore::new(256),
@@ -348,7 +352,7 @@ impl VulkanBackend {
         descriptor_sets: SequentialIDStore::new(512),
         frame_buffers: SequentialIDStore::new(256),
         pipelines: SequentialIDStore::new(32),
-        images: SequentialIDStore::new(1024),
+        images,
         buffers: SequentialIDStore::new(1024),
         allocator,
         descriptor_pool,
@@ -971,6 +975,37 @@ impl rhi::RenderBackend for VulkanBackend {
           *fence_vk
         )
         .map_err(|e| format!("at submit queue submit: {e}"))
+    }
+  }
+  
+  fn get_swapchain_images(&self) -> Vec<rhi::ImageID>{
+    self.swapchain_images.clone()
+  }
+  
+  fn present_swapchain_image(&self, id: u32) -> Result<bool,String> {
+    unsafe {
+      self
+        .swapchain_device
+        .queue_present(
+          self.graphics_queue,
+          &vk::PresentInfoKHR::default().image_indices(&[id]).swapchains(&[self.swapchain])
+        )
+        .map_err(|e| format!("at presenting: {e}"))
+    }
+  }
+  
+  fn acquire_present_image(&self, fence_id: rhi::FenceID) -> Result<u32,String>{
+    unsafe {
+      self
+        .swapchain_device
+        .acquire_next_image(
+          self.swapchain,
+          999999,
+          vk::Semaphore::null(),
+          self.fences.get_obj(fence_id.0)?.clone()
+        )
+        .map(|x| x.0)
+        .map_err(|e| format!("at acquiring present image: {e}"))
     }
   }
 }
