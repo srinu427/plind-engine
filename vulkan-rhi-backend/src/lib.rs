@@ -198,6 +198,7 @@ pub struct VulkanBackend {
   swapchain_res: vk::Extent2D,
   surface_format: vk::SurfaceFormatKHR,
   swapchain_device: khr::swapchain::Device,
+  surface: vk::SurfaceKHR,
   ash_device: ash::Device,
   surface_instance: khr::surface::Instance,
   ash_instance: ash::Instance,
@@ -364,6 +365,7 @@ impl VulkanBackend {
         swapchain_res,
         surface_format,
         swapchain_device,
+        surface,
         ash_device,
         surface_instance,
         ash_instance,
@@ -1006,6 +1008,24 @@ impl rhi::RenderBackend for VulkanBackend {
         )
         .map(|x| x.0)
         .map_err(|e| format!("at acquiring present image: {e}"))
+    }
+  }
+}
+
+impl Drop for VulkanBackend{
+  fn drop(&mut self){
+    unsafe {
+      let image_ids = self.images.get_all().keys().cloned().collect::<Vec<_>>();
+      for image_id in image_ids {
+        self.destroy_image(rhi::ImageID(image_id));
+      }
+      let buffer_ids = self.buffers.get_all().keys().cloned().collect::<Vec<_>>();
+      for buffer_id in buffer_ids {
+        self.destroy_buffer(rhi::BufferID(buffer_id));
+      }
+      self.surface_instance.destroy_surface(self.surface, None);
+      self.ash_device.destroy_device(None);
+      self.ash_instance.destroy_instance(None);
     }
   }
 }

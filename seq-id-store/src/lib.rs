@@ -46,4 +46,8 @@ impl<T> SequentialIDStore<T>{
   pub fn get_obj_mut(&mut self, id: u32) -> Result<&mut T, &'static str>{
     self.store.get_mut(&id).ok_or("item not found")
   }
+
+  pub fn get_all(&self) -> &HashMap<u32, T> {
+    &self.store
+  }
 }

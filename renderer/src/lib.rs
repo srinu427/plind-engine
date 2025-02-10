@@ -46,12 +46,12 @@ impl<B: RenderBackend> PbrRenderer<B>{
 
 pub struct Renderer<B: RenderBackend>{
   backend: Arc<Mutex<B>>,
-  pbr_renderer: PbrRenderer,
+  pbr_renderer: PbrRenderer<B>,
 }
 
 impl<B: RenderBackend> Renderer<B>{
   pub fn new(backend: Arc<Mutex<B>>) -> Result<Renderer<B>, String>{
-    let pbr_renderer = PbrRenderer::new(&mut backend);
+    let pbr_renderer = PbrRenderer::new(backend.clone())?;
     Ok(Self{ backend, pbr_renderer })
   }
 }
