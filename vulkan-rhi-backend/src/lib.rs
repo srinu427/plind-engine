@@ -910,8 +910,47 @@ impl rhi::RenderBackend for VulkanBackend {
               &[vk::BufferCopy::default().src_offset(0).dst_offset(0).size(src_buffer_vk.size)]
             );
           }
-          rhi::GPUCommands::CopyBufferToImage { .. } => {}
-          rhi::GPUCommands::BlitImage { .. } => {}
+          rhi::GPUCommands::CopyBufferToImage { src, dst } => {
+            let src_buffer_vk = self.buffers.get_obj(src.0)?;
+            let dst_image_vk = self.images.get_obj(dst.0)?;
+            let dst_img_extent = vk::Extent3D{
+              width: dst_image_vk.resolution.width,
+              height: dst_image_vk.resolution.height,
+              depth: 1
+            };
+            self.ash_device.cmd_copy_buffer_to_image(
+              command_buffer_vk,
+              src_buffer_vk.buffer,
+              dst_image_vk.image,
+              vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+              &[
+                vk::BufferImageCopy::default()
+                  .image_offset(vk::Offset3D::default())
+                  .image_extent(dst_img_extent)
+                  .image_subresource(vk::ImageSubresourceLayers::default()
+                    .aspect_mask(get_aspect_mask(dst_image_vk.format))
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .mip_level(0)
+                  )
+              ]
+            );
+          }
+          rhi::GPUCommands::BlitImage { src, dst } => {
+            let src_image = self.images.get_obj(src.0)?;
+            let dst_image = self.images.get_obj(dst.0)?;
+            self.ash_device.cmd_blit_image(
+              command_buffer_vk,
+              src_image.image,
+              vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+              dst_image.image,
+              vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+              &[
+                vk::ImageBlit::default()
+              ],
+              vk::Filter::CUBIC_IMG
+            );
+          }
           rhi::GPUCommands::RunGraphicsPipeline { .. } => {}
         }
         for (img, states) in image_needed_state.iter() {
