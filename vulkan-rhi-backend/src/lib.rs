@@ -608,7 +608,13 @@ impl rhi::RenderBackend for VulkanBackend {
         .map_err(|e| format!("at texture set layout creation: {e}"))?;
       let pipeline_set_layouts = [buffer_set_layout, texture_set_layout];
       let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(&pipeline_set_layouts);
+        .set_layouts(&pipeline_set_layouts)
+        .push_constant_ranges(&[
+          vk::PushConstantRange::default()
+            .offset(0)
+            .size(128)
+            .stage_flags(vk::ShaderStageFlags::ALL),
+        ]);
       let pipeline_layout = self
         .ash_device
         .create_pipeline_layout(&pipeline_layout_create_info, None)
@@ -947,11 +953,74 @@ impl rhi::RenderBackend for VulkanBackend {
               vk::ImageLayout::TRANSFER_DST_OPTIMAL,
               &[
                 vk::ImageBlit::default()
+                  .src_offsets([
+                    vk::Offset3D::default(),
+                    vk::Offset3D{
+                      x: src_image.resolution.width as _,
+                      y: src_image.resolution.height as _,
+                      z: 0
+                    },
+                  ])
+                  .dst_offsets([
+                    vk::Offset3D::default(),
+                    vk::Offset3D{
+                      x: dst_image.resolution.width as _,
+                      y: dst_image.resolution.height as _,
+                      z: 0
+                    }
+                  ])
               ],
               vk::Filter::CUBIC_IMG
             );
           }
-          rhi::GPUCommands::RunGraphicsPipeline { .. } => {}
+          rhi::GPUCommands::RunGraphicsPipeline { pipeline, framebuffer, input_set, draw_infos } => {
+            let framebuffer_vk = self.frame_buffers.get_obj(framebuffer.0)?;
+            let framebuffer_res =
+              self.images.get_obj(framebuffer_vk.color_attachments[0].0)?.resolution;
+            let pipeline_vk = self.pipelines.get_obj(pipeline.0)?;
+            let input_set_vk = self.descriptor_sets.get_obj(input_set.0)?;
+            self.ash_device.cmd_begin_render_pass(
+              command_buffer_vk,
+              &vk::RenderPassBeginInfo::default()
+                .framebuffer(framebuffer_vk.framebuffer)
+                .render_pass(pipeline_vk.render_pass)
+                .render_area(
+                  vk::Rect2D::default()
+                    .offset(vk::Offset2D::default())
+                    .extent(
+                      vk::Extent2D::default()
+                        .width(framebuffer_res.width as _)
+                        .height(framebuffer_res.height as _)
+                        .width(1)
+                    )
+                ),
+              vk::SubpassContents::INLINE,
+            );
+            self.ash_device.cmd_bind_pipeline(
+              command_buffer_vk,
+              vk::PipelineBindPoint::GRAPHICS,
+              pipeline_vk.pipeline,
+            );
+            self.ash_device.cmd_bind_descriptor_sets(
+              command_buffer_vk,
+              vk::PipelineBindPoint::GRAPHICS,
+              pipeline_vk.pipeline_layout,
+              0,
+              &[input_set_vk.buffer_set, input_set_vk.texture_set],
+              &[0, 0]
+            );
+            for draw_info in draw_infos.iter() {
+              self.ash_device.cmd_push_constants(
+                command_buffer_vk,
+                pipeline_vk.pipeline_layout,
+                vk::ShaderStageFlags::ALL,
+                0,
+                &draw_info.push_const_data
+              );
+              self.ash_device.cmd_draw(command_buffer_vk, draw_info.count, 1, 0, 0);
+            }
+            self.ash_device.cmd_end_render_pass(command_buffer_vk);
+          }
         }
         for (img, states) in image_needed_state.iter() {
           let img_vk = self.images.get_obj(img.0)?;

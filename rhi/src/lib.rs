@@ -148,8 +148,9 @@ pub struct CommandBufferID(pub u32);
 
 #[derive(Debug, Clone, Copy)]
 pub struct DrawInfo{
-  offset: u32,
-  count: u32,
+  pub offset: u32,
+  pub count: u32,
+  pub push_const_data: [u8; 128],
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +169,7 @@ pub enum GPUCommands{
 #[trait_variant::make(RenderBackend: Send)]
 pub trait LocalRenderBackend {
   fn get_swapchain_info(&self) -> SwapchainInfo;
+
   fn create_buffer(
     &mut self,
     size: u64,
